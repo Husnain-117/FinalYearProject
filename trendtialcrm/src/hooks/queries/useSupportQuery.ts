@@ -22,7 +22,7 @@ import {
 } from '../../types/support';
 
 // Support Agent Backend URL (Clara Backend) - Must match simple_ui.html
-const SUPPORT_API_URL = 'http://localhost:8001';
+const SUPPORT_API_URL = import.meta.env.VITE_CLARA_BACKEND_URL || 'http://localhost:8001';
 const API_BASE = `${SUPPORT_API_URL}/api/tickets`;
 
 // Helper to transform backend response to frontend format

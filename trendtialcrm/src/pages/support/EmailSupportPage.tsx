@@ -19,7 +19,7 @@ import {
   ChartBarIcon,
 } from '@heroicons/react/24/outline';
 
-const SUPPORT_API_URL = import.meta.env.VITE_SUPPORT_API_URL || 'http://localhost:8001';
+const SUPPORT_API_URL = import.meta.env.VITE_CLARA_BACKEND_URL || 'http://localhost:8001';
 
 // Email categories
 const emailCategories: { value: TicketCategory; label: string; icon: string }[] = [
