@@ -35,7 +35,6 @@ from orchestrator.core import get_orchestrator
 from agents.sales_agent.agent import SalesAgent
 from agents.marketing_agent.agent import MarketingAgent
 from agents.support_agent.agent import SupportAgent
-from input_streams.voice_stream import VoiceStream
 from utils.logger import get_logger
 from config import settings
 
@@ -112,9 +111,10 @@ async def startup_event():
             agents["marketing"] = MarketingAgent()
             logger.info("✓ Marketing Agent initialized")
         
-        # Initialize voice stream if enabled
+        # Initialize voice stream if enabled (lazy import — pyaudio only on local)
         if settings.VOICE_INPUT_ENABLED:
             logger.info("Initializing voice stream...")
+            from input_streams.voice_stream import VoiceStream
             voice_stream = VoiceStream()
             logger.info("✓ Voice stream initialized")
         
