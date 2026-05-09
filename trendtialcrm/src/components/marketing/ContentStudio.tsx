@@ -778,7 +778,7 @@ const ContentStudio: React.FC<ContentStudioProps> = ({ leads }) => {
                 <div className="mt-3 p-4 bg-indigo-50 border border-indigo-200 rounded-xl space-y-3">
                   <p className="text-sm font-semibold text-indigo-800 flex items-center gap-1.5">
                     <PaperAirplaneIcon className="h-4 w-4" />
-                    Send via Resend
+                    Send via Email
                   </p>
                   <div className="flex gap-2">
                     <input

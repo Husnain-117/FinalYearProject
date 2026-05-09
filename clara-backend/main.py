@@ -377,6 +377,45 @@ except Exception as e:
     logger.warning(f"Support Agent routes not loaded: {e}")
 
 
+# =============================================================================
+# EMAIL PROXY — Resend API (server-side, no key exposed to browser)
+# =============================================================================
+
+class SendEmailRequest(BaseModel):
+    to: str
+    subject: str
+    html: str
+
+
+@app.post("/api/send-email")
+async def send_email_proxy(req: SendEmailRequest):
+    """Send email via Resend API server-side."""
+    import requests as _req
+
+    api_key = settings.RESEND_API_KEY
+    if not api_key:
+        raise HTTPException(status_code=500, detail="RESEND_API_KEY is not configured")
+
+    from_email = settings.RESEND_FROM_EMAIL or "onboarding@resend.dev"
+
+    try:
+        resp = _req.post(
+            "https://api.resend.com/emails",
+            json={"from": from_email, "to": req.to, "subject": req.subject, "html": req.html},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout=15,
+        )
+        data = resp.json()
+        if not resp.ok:
+            error_msg = data.get("message") or data.get("name") or "Resend API error"
+            logger.error(f"Resend error {resp.status_code}: {data}")
+            raise HTTPException(status_code=resp.status_code, detail=error_msg)
+        logger.info(f"Email sent via Resend → id={data.get('id')} to={req.to}")
+        return {"id": data.get("id"), "message": "Email sent successfully"}
+    except _req.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Failed to reach Resend API: {e}")
+
+
 def main():
     """Main entry point"""
     logger.info("="*60)
