@@ -379,6 +379,24 @@ export const salesCallApi = {
       };
     }
   },
+
+  /**
+   * Convert text to speech using ElevenLabs (via backend) and return audio Blob
+   */
+  async speak(text: string): Promise<Blob | null> {
+    try {
+      const response = await fetch(`${CLARA_BACKEND_URL}/api/sales/calls/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!response.ok) throw new Error(`TTS request failed: ${response.status}`);
+      return await response.blob();
+    } catch (error) {
+      console.error('TTS speak failed:', error);
+      return null;
+    }
+  },
 };
 
 export default salesCallApi;

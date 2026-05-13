@@ -13,7 +13,7 @@
  * Architecture:
  * - Frontend: React + TypeScript with TanStack Query for data fetching
  * - Backend: Clara Sales Agent (Python FastAPI)
- * - Voice: Groq Whisper (STT) + MeloTTS/Piper (TTS) + Llama 3.3 70B (LLM)
+ * - Voice: Groq Whisper (STT) + ElevenLabs eleven_turbo_v2_5 (TTS) + Llama 3.3 70B (LLM)
  * 
  * Related Files:
  * - Backend: clara-backend/agents/sales_agent/
@@ -124,36 +124,22 @@ const TABS: TabConfig[] = [
 ];
 
 // =============================================================================
-// MOCK DATA (Replace with real API calls in production)
+// EMPTY STATS (shown while loading or when backend is unavailable)
 // =============================================================================
 
-const MOCK_STATS: CallStatistics = {
-  totalCalls: 127,
-  totalDurationSeconds: 34500,
-  averageDurationSeconds: 272,
-  successRate: 85,
-  qualificationRate: 68,
-  outcomes: {
-    completed: 78,
-    qualified: 32,
-    not_interested: 12,
-    no_answer: 5,
-    failed: 0,
-  },
-  callsByDay: [
-    { date: '2024-12-04', count: 15 },
-    { date: '2024-12-05', count: 22 },
-    { date: '2024-12-06', count: 18 },
-    { date: '2024-12-07', count: 25 },
-    { date: '2024-12-08', count: 20 },
-    { date: '2024-12-09', count: 27 },
-    { date: '2024-12-10', count: 0 },
-  ],
+const EMPTY_STATS: CallStatistics = {
+  totalCalls: 0,
+  totalDurationSeconds: 0,
+  averageDurationSeconds: 0,
+  successRate: 0,
+  qualificationRate: 0,
+  outcomes: {},
+  callsByDay: [],
   qualificationBreakdown: {
-    unqualified: 32,
-    marketing_qualified: 45,
-    sales_qualified: 35,
-    opportunity: 15,
+    unqualified: 0,
+    marketing_qualified: 0,
+    sales_qualified: 0,
+    opportunity: 0,
   },
 };
 
@@ -173,10 +159,12 @@ const SalesHubPage: React.FC = () => {
   const leads: Lead[] = leadsResponse?.leads || [];
 
   // Real data from CRM database
-  const [stats, setStats] = useState<CallStatistics>(MOCK_STATS);
+  const [stats, setStats] = useState<CallStatistics>(EMPTY_STATS);
   const [calls, setCalls] = useState<CRMCallRecord[]>([]);
   const [isLoadingStats, setIsLoadingStats] = useState(true);
   const [isLoadingCalls, setIsLoadingCalls] = useState(true);
+  // null = still determining; true = connected; false = unreachable
+  const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
 
   // Fetch call statistics
   const fetchStats = useCallback(async () => {
@@ -199,9 +187,13 @@ const SalesHubPage: React.FC = () => {
             opportunity: 0,
           },
         });
+        setBackendAvailable(true);
+      } else {
+        setBackendAvailable(false);
       }
     } catch (error) {
       console.error('Failed to fetch call statistics:', error);
+      setBackendAvailable(false);
     } finally {
       setIsLoadingStats(false);
     }
@@ -214,9 +206,13 @@ const SalesHubPage: React.FC = () => {
       const response = await salesCallApi.getCallHistory(50);
       if (response.success) {
         setCalls(response.calls);
+        setBackendAvailable(true);
+      } else {
+        setBackendAvailable(false);
       }
     } catch (error) {
       console.error('Failed to fetch call history:', error);
+      setBackendAvailable(false);
     } finally {
       setIsLoadingCalls(false);
     }
@@ -399,6 +395,23 @@ const SalesHubPage: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* Backend unavailable notice */}
+        {backendAvailable === false && (
+          <div className="mb-4 flex items-start gap-3 rounded-lg border border-yellow-400/50 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
+            <span className="mt-0.5 shrink-0">⚠️</span>
+            <span>
+              <strong>Clara backend is unreachable</strong> — call statistics and history cannot be loaded.
+              Make sure the backend is running on port 8001, then{' '}
+              <button
+                onClick={handleRefresh}
+                className="underline underline-offset-2 font-medium hover:opacity-70"
+              >
+                retry
+              </button>.
+            </span>
+          </div>
+        )}
 
         {/* Tab Navigation */}
         {renderTabs()}

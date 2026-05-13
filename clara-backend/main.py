@@ -118,6 +118,18 @@ async def startup_event():
             voice_stream = VoiceStream()
             logger.info("✓ Voice stream initialized")
         
+        # Pre-warm the VoiceCallService so its internal component init is already done
+        # before the first HTTP request (health / statistics / history) arrives.
+        # Running in a thread executor avoids blocking the startup coroutine.
+        try:
+            from services.voice_call_service import get_voice_call_service
+            voice_call_svc = get_voice_call_service()
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, voice_call_svc.initialize_components)
+            logger.info("✓ Voice Call Service pre-warmed")
+        except Exception as e:
+            logger.warning(f"Voice Call Service pre-warm failed (non-fatal): {e}")
+
         logger.info(f"✨ Clara Backend started successfully on port {settings.ORCHESTRATOR_PORT}")
         logger.info(f"   Environment: {settings.ENVIRONMENT}")
         logger.info(f"   Enabled agents: {orchestrator.get_enabled_agents()}")

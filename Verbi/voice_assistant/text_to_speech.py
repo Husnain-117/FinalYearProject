@@ -52,13 +52,38 @@ def text_to_speech(model: str, api_key:str, text:str, output_file_path:str, loca
         
         elif model == 'elevenlabs':
             client = ElevenLabs(api_key=api_key)
-            audio = client.generate(
-                text=text, 
-                voice="Paul J.", 
-                output_format="mp3_22050_32", 
-                model="eleven_turbo_v2"
-            )
-            elevenlabs.save(audio, output_file_path)
+            audio_bytes = b""
+
+            # Compatible with both elevenlabs SDK v1.x and v2.x
+            try:
+                # v2.x SDK: client.text_to_speech.convert()
+                response = client.text_to_speech.convert(
+                    voice_id="21m00Tcm4TlvDq8ikWAM",
+                    text=text,
+                    model_id="eleven_turbo_v2_5",
+                    output_format="mp3_22050_32",
+                )
+                for chunk in response:
+                    if isinstance(chunk, bytes):
+                        audio_bytes += chunk
+            except AttributeError:
+                # v1.x SDK: client.generate()
+                logging.info("ElevenLabs: using v1.x generate() API")
+                response = client.generate(
+                    text=text,
+                    voice="Rachel",
+                    model="eleven_turbo_v2_5",
+                )
+                for chunk in response:
+                    if isinstance(chunk, bytes):
+                        audio_bytes += chunk
+
+            if not audio_bytes:
+                raise ValueError("ElevenLabs returned no audio data")
+
+            with open(output_file_path, 'wb') as f:
+                f.write(audio_bytes)
+            logging.info(f"ElevenLabs TTS generated: {len(audio_bytes)} bytes")
         
         elif model == "cartesia":
             from voice_assistant.interruption_handler import get_interruption_handler

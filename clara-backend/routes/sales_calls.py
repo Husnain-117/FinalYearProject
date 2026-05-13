@@ -5,12 +5,17 @@ REST API endpoints for AI-powered voice sales calls
 @author Faheem
 """
 
+import asyncio
+import requests as http_requests
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 
 from services.voice_call_service import get_voice_call_service
 from utils.logger import get_logger
+from config import settings
 
 logger = get_logger("sales_calls_api")
 
@@ -24,6 +29,11 @@ router = APIRouter(prefix="/api/sales/calls", tags=["Sales Calls"])
 class StartCallRequest(BaseModel):
     """Request to start a new call"""
     lead_id: Optional[str] = None
+
+
+class TTSRequest(BaseModel):
+    """Request to convert text to speech"""
+    text: str
 
 
 class StartCallResponse(BaseModel):
@@ -56,6 +66,36 @@ class EndCallResponse(BaseModel):
 # =============================================================================
 # API ENDPOINTS
 # =============================================================================
+
+
+@router.post("/tts")
+async def text_to_speech(request: TTSRequest):
+    """Convert text to speech using ElevenLabs API and return MP3 audio"""
+    try:
+        api_key = settings.ELEVENLABS_API_KEY
+        if not api_key:
+            raise HTTPException(status_code=503, detail="ElevenLabs API key not configured")
+
+        resp = http_requests.post(
+            "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",
+            headers={
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": api_key,
+            },
+            json={
+                "text": request.text,
+                "model_id": "eleven_turbo_v2_5",
+                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return Response(content=resp.content, media_type="audio/mpeg")
+    except http_requests.RequestException as e:
+        logger.error(f"ElevenLabs TTS error: {e}")
+        raise HTTPException(status_code=503, detail=f"ElevenLabs API error: {str(e)}")
+
 
 @router.post("/start", response_model=StartCallResponse)
 async def start_call(request: StartCallRequest):
@@ -222,8 +262,11 @@ async def health_check():
     try:
         service = get_voice_call_service()
         
-        # Try to initialize components
-        components_ready = service.initialize_components()
+        # Run blocking initialization in a thread-pool so we never stall the event loop.
+        # Without this, concurrent page-load requests (health + stats + history) would
+        # cause connection resets that the browser surfaces as CORS null errors.
+        loop = asyncio.get_event_loop()
+        components_ready = await loop.run_in_executor(None, service.initialize_components)
         
         return {
             "success": True,
@@ -233,8 +276,8 @@ async def health_check():
                 "sales_agent": "sales" in service._agents,
                 "voice_stream": service._voice_stream is not None
             },
-            "stt_model": "groq",
-            "tts_model": "piper",
+            "stt_model": settings.STT_MODEL,
+            "tts_model": settings.TTS_MODEL,
             "llm_model": "llama-3.3-70b-versatile"
         }
         

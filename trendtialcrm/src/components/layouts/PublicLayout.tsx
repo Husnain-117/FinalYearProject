@@ -1,6 +1,7 @@
 // src/components/layouts/PublicLayout.tsx
 import React from 'react';
 import { Outlet } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
 
 const TrendtialLogo = () => (
   <div className="flex items-center justify-center mb-8">
@@ -18,10 +19,32 @@ const TrendtialLogo = () => (
   </div>
 );
 
+const ServiceDownBanner: React.FC = () => (
+  <div className="w-full max-w-md mb-4 flex items-start gap-3 rounded-lg border border-yellow-400/50 bg-yellow-50 dark:bg-yellow-900/20 px-4 py-3 text-sm text-yellow-800 dark:text-yellow-300">
+    <span className="mt-0.5 shrink-0 text-base">⚠️</span>
+    <span>
+      <strong>Authentication service unreachable.</strong> The Supabase project may be{' '}
+      <strong>paused</strong> (free-tier projects pause after inactivity).{' '}
+      <a
+        href="https://app.supabase.com"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="underline underline-offset-2 hover:opacity-80"
+      >
+        Open Supabase dashboard
+      </a>{' '}
+      → restore your project, then try logging in again.
+    </span>
+  </div>
+);
+
 const PublicLayout: React.FC = () => {
+  const { serviceReachable } = useAuth();
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-background text-foreground p-4">
       <TrendtialLogo />
+      {!serviceReachable && <ServiceDownBanner />}
       <main className="w-full max-w-md">
         <div className="bg-card shadow-2xl rounded-xl p-8 sm:p-10">
           <Outlet />

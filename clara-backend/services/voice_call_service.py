@@ -8,6 +8,7 @@ Provides API interface for the voice pipeline
 import asyncio
 import uuid
 import threading
+import time
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 from enum import Enum
@@ -176,7 +177,22 @@ class VoiceCallService:
             try:
                 session.status = CallStatus.ACTIVE
                 logger.info(f"Call {session_id} is now active")
-                
+
+                # Add welcome greeting so frontend plays it immediately
+                greeting = (
+                    "Hello! Welcome to TrendtialCRM. I'm Clara, your AI sales assistant. "
+                    "How can I help you today?"
+                )
+                session.transcript.append({
+                    "role": "ai",
+                    "text": greeting,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                logger.info("Welcome greeting added to transcript")
+
+                # Wait for frontend to play the greeting before mic starts listening
+                time.sleep(5)
+
                 # Process callback for the voice stream
                 def process_callback(text: str) -> Dict[str, Any]:
                     """Process transcribed text through the pipeline"""
@@ -232,11 +248,24 @@ class VoiceCallService:
                         logger.error(f"Error processing message: {e}")
                         return {"message": "I apologize, there was an error.", "success": False}
                 
-                # Run continuous voice interaction
-                result = self._voice_stream.continuous_voice_interaction(
-                    process_callback,
-                    session_id=session_id
-                )
+                # Minimal loop — STT + LLM only, no backend TTS (frontend plays audio)
+                logger.info("Voice listening loop started")
+                while not session._stop_requested:
+                    try:
+                        transcribed_text = self._voice_stream.capture_voice_input()
+                        if session._stop_requested:
+                            break
+                        if not transcribed_text:
+                            continue
+                        if self._voice_stream._is_closing_word(transcribed_text):
+                            logger.info("Closing words detected — ending call")
+                            break
+                        process_callback(transcribed_text)
+                    except Exception as loop_err:
+                        if session._stop_requested:
+                            break
+                        logger.error(f"Voice loop error: {loop_err}")
+                        continue
                 
                 # Call completed
                 session.status = CallStatus.COMPLETED

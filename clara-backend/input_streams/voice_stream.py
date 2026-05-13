@@ -42,10 +42,11 @@ class VoiceStream:
         self.output_audio_path = "voice_output.wav"
         
         # Determine TTS output format (Cartesia uses streaming, others use files)
-        if settings.TTS_MODEL in ['openai', 'elevenlabs', 'melotts']:
+        if settings.TTS_MODEL in ['openai', 'melotts']:
             self.output_audio_path = "voice_output.mp3"
         elif settings.TTS_MODEL == 'cartesia':
-            # Cartesia streams directly, but we may need a temp file
+            self.output_audio_path = "voice_output.wav"
+        elif settings.TTS_MODEL == 'elevenlabs':
             self.output_audio_path = "voice_output.mp3"
         
         # Initialize interruption handling (only for Cartesia streaming TTS)
@@ -65,7 +66,7 @@ class VoiceStream:
                 speech_frames_threshold=5,  # Faster interruption (was 8) - detects speech sooner
                 energy_threshold=300  # Lower threshold (was 500) - more sensitive
             )
-            logger.info("Interruption handling enabled for Cartesia TTS (sensitive mode)")
+            logger.info(f"Interruption handling enabled for {settings.TTS_MODEL} TTS (sensitive mode)")
         
         logger.info("Voice stream initialized")
         logger.info(f"STT Model: {settings.STT_MODEL}")
@@ -115,7 +116,7 @@ class VoiceStream:
             # Get appropriate API key based on TTS model
             api_key = self._get_tts_api_key()
             
-            # Setup interruption handling for Cartesia (streaming TTS)
+            # Setup interruption handling for streaming TTS (Cartesia only)
             was_interrupted = False
             if settings.TTS_MODEL == 'cartesia' and self.vad_detector and self.interrupt_handler:
                 # Clear any previous interruption state
@@ -150,6 +151,9 @@ class VoiceStream:
             except RuntimeError as e:
                 # Suppress generator cleanup errors during interruption (expected behavior)
                 if "generator ignored GeneratorExit" not in str(e):
+                    if settings.TTS_MODEL == 'elevenlabs':
+                        logger.warning(f"ElevenLabs TTS error: {e} — falling back to Piper...")
+                        return self._fallback_to_piper(text)
                     raise
                 was_interrupted = True
                 logger.info("TTS generator was interrupted (expected)")
@@ -157,6 +161,13 @@ class VoiceStream:
                 # Also handle GeneratorExit which can occur during interruption
                 was_interrupted = True
                 logger.info("TTS generator exit (interruption)")
+            except Exception as e:
+                # Catch any ElevenLabs API/network errors and fall back to Piper
+                if settings.TTS_MODEL == 'elevenlabs':
+                    logger.warning(f"ElevenLabs TTS failed: {e} — falling back to Piper...")
+                    return self._fallback_to_piper(text)
+                logger.error(f"TTS error: {e}")
+                return False
             
             # Stop VAD monitoring after TTS completes (or is interrupted)
             if self.vad_detector and self.vad_detector.is_active():
@@ -276,9 +287,8 @@ class VoiceStream:
                     "processing_result": processing_result
                 }
             elif voice_result:
-                # Only play if not interrupted (for non-streaming models)
-                if settings.TTS_MODEL != 'cartesia':
-                    self.play_voice_output()
+                # NOTE: Frontend browser Audio API handles TTS playback — skip backend pygame
+                pass
             else:
                 logger.error("Failed to generate voice output")
             
@@ -353,9 +363,8 @@ class VoiceStream:
                     # Continue to next iteration to capture user's interruption
                     continue
                 elif voice_result:
-                    # Only play if not interrupted (for non-streaming models)
-                    if settings.TTS_MODEL != 'cartesia':
-                        self.play_voice_output()
+                    # NOTE: Frontend browser Audio API handles TTS playback — skip backend pygame
+                    pass
                 else:
                     logger.error("Failed to generate voice output")
                 
@@ -438,9 +447,27 @@ class VoiceStream:
         elif settings.TTS_MODEL == 'cartesia':
             return settings.CARTESIA_API_KEY
         elif settings.TTS_MODEL == 'elevenlabs':
-            return os.getenv("ELEVENLABS_API_KEY")
+            return settings.ELEVENLABS_API_KEY
         else:
             return None
+
+    def _fallback_to_piper(self, text: str) -> bool:
+        """Fall back to Piper TTS when ElevenLabs is unavailable"""
+        try:
+            logger.info("Using Piper TTS as fallback...")
+            fallback_path = "voice_output_fallback.wav"
+            text_to_speech(
+                model='piper',
+                api_key=None,
+                text=text,
+                output_file_path=fallback_path,
+                local_model_path=None
+            )
+            play_audio(fallback_path)
+            return True
+        except Exception as e:
+            logger.error(f"Piper fallback also failed: {e}")
+            return False
     
     def cleanup(self):
         """Clean up audio files and stop VAD monitoring"""

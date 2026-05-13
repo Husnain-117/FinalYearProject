@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = Field(default="AIzaSyADeYgcwx3_wLr8zNxnQJIV4cMYxT-59CA")  # Google Gemini for marketing content
     CARTESIA_API_KEY: str = Field(default="")  # For TTS
     DEEPGRAM_API_KEY: str = Field(default="")  # Backup for STT/TTS
+    ELEVENLABS_API_KEY: str = Field(default="")  # ElevenLabs TTS (primary, fast)
     RESEND_API_KEY: str = Field(default="re_e2bEvcQt_HJAUKNzFBRywFL9UgY5aDNhP")  # Resend email service
     RESEND_FROM_EMAIL: str = Field(default="onboarding@resend.dev")  # Sender address (use verified domain for arbitrary recipients)
     
@@ -63,7 +64,7 @@ class Settings(BaseSettings):
     # ===== Voice Integration (matching Verbi configuration) =====
     VOICE_INPUT_ENABLED: bool = True
     STT_MODEL: str = "groq"  # Using Groq Whisper for transcription
-    TTS_MODEL: str = "piper"  # Using Cartesia for TTS (streaming)
+    TTS_MODEL: str = "elevenlabs"  # Using ElevenLabs TTS (primary, streaming) with Piper fallback
     
     # ===== Email Integration =====
     EMAIL_INPUT_ENABLED: bool = False

@@ -13,7 +13,7 @@
  * Voice Pipeline:
  * - STT: Groq Whisper (cloud, free)
  * - LLM: Llama 3.3 70B (Groq, free)
- * - TTS: Piper (local, free)
+ * - TTS: ElevenLabs eleven_turbo_v2_5 (cloud, streaming)
  * 
  * @author Faheem
  */
@@ -29,8 +29,6 @@ import {
   CpuChipIcon,
   CheckCircleIcon,
   XCircleIcon,
-  PlayIcon,
-  InformationCircleIcon,
   ExclamationTriangleIcon,
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
@@ -116,8 +114,11 @@ const AICallPanel: React.FC = () => {
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const isResumingRef = useRef(false);
+  // Auto-retry ref for backend health polling
+  const healthPollRef = useRef<NodeJS.Timeout | null>(null);
   // Sentinel ref — keeps the transcript pinned to the latest message
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const lastPlayedMsgRef = useRef<string>('');  // tracks last AI message spoken
 
   // Persist ALL session state to sessionStorage when it changes
   useEffect(() => {
@@ -138,10 +139,29 @@ const AICallPanel: React.FC = () => {
     }
   }, [sessionId, callStatus, callDuration, qualificationStatus, leadScore, bant, transcript, statusMessages]);
 
-  // Check backend health on mount
+  // Check backend health on mount; auto-retry every 15 s while backend is unreachable.
+  // This handles the common race where the backend starts AFTER the page loads.
   useEffect(() => {
     checkBackendHealth();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!backendHealth.isHealthy && !backendHealth.isChecking) {
+      healthPollRef.current = setTimeout(() => {
+        healthPollRef.current = null;
+        checkBackendHealth();
+      }, 15_000);
+    } else if (backendHealth.isHealthy && healthPollRef.current) {
+      clearTimeout(healthPollRef.current);
+      healthPollRef.current = null;
+    }
+    return () => {
+      if (healthPollRef.current) {
+        clearTimeout(healthPollRef.current);
+        healthPollRef.current = null;
+      }
+    };
+  }, [backendHealth.isHealthy, backendHealth.isChecking]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Timer effect
   useEffect(() => {
@@ -157,9 +177,64 @@ const AICallPanel: React.FC = () => {
     };
   }, [callStatus]);
 
+  // Cancel browser speech synthesis immediately when call is no longer active
+  useEffect(() => {
+    if (callStatus !== 'active') {
+      window.speechSynthesis?.cancel();
+    }
+  }, [callStatus]);
+
   // Auto-scroll to latest message whenever transcript grows
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [transcript]);
+
+  // Browser Web Speech API fallback — always works, no API key needed
+  const speakWithBrowser = (text: string) => {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.95;
+    utterance.pitch = 1.05;
+    utterance.volume = 1.0;
+    const doSpeak = () => {
+      const voices = window.speechSynthesis.getVoices();
+      const voice =
+        voices.find(v => v.lang === 'en-US' && !v.localService) ||
+        voices.find(v => v.lang.startsWith('en-US')) ||
+        voices.find(v => v.lang.startsWith('en'));
+      if (voice) utterance.voice = voice;
+      window.speechSynthesis.speak(utterance);
+    };
+    if (window.speechSynthesis.getVoices().length > 0) {
+      doSpeak();
+    } else {
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.onvoiceschanged = null;
+        doSpeak();
+      };
+    }
+  };
+
+  // Play AI response — try ElevenLabs first, fall back to browser speech
+  useEffect(() => {
+    if (callStatus !== 'active') return;  // only speak during active calls
+    const aiMsgs = transcript.filter(m => m.role === 'ai');
+    if (aiMsgs.length === 0) return;
+    const latest = aiMsgs[aiMsgs.length - 1];
+    if (latest.text === lastPlayedMsgRef.current) return;
+    lastPlayedMsgRef.current = latest.text;
+    salesCallApi.speak(latest.text).then(blob => {
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.play().catch(() => speakWithBrowser(latest.text));
+        audio.onended = () => URL.revokeObjectURL(url);
+      } else {
+        // ElevenLabs unavailable (e.g. 402) — use browser TTS
+        speakWithBrowser(latest.text);
+      }
+    });
   }, [transcript]);
 
   // Cleanup on unmount
@@ -167,6 +242,7 @@ const AICallPanel: React.FC = () => {
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
       if (timerRef.current)  clearInterval(timerRef.current);
+      if (healthPollRef.current) clearTimeout(healthPollRef.current);
     };
   }, []);
 
@@ -392,16 +468,15 @@ const AICallPanel: React.FC = () => {
     setError(null);
   };
 
-  // Get status badge color
   const getStatusColor = (status: CallStatus): string => {
     switch (status) {
-      case 'idle': return 'bg-gray-100 text-gray-600';
-      case 'connecting': return 'bg-yellow-100 text-yellow-700 animate-pulse';
-      case 'active': return 'bg-green-100 text-green-700';
-      case 'ending': return 'bg-orange-100 text-orange-700';
-      case 'completed': return 'bg-blue-100 text-blue-700';
-      case 'failed': return 'bg-red-100 text-red-700';
-      default: return 'bg-gray-100 text-gray-600';
+      case 'idle': return 'bg-white/10 text-white/80 border-white/20';
+      case 'connecting': return 'bg-yellow-400/20 text-yellow-200 border-yellow-400/30 animate-pulse';
+      case 'active': return 'bg-emerald-400/20 text-emerald-200 border-emerald-400/30';
+      case 'ending': return 'bg-orange-400/20 text-orange-200 border-orange-400/30';
+      case 'completed': return 'bg-emerald-400/20 text-emerald-200 border-emerald-400/30';
+      case 'failed': return 'bg-red-400/20 text-red-200 border-red-400/30';
+      default: return 'bg-white/10 text-white/60 border-white/10';
     }
   };
 
@@ -437,247 +512,252 @@ const AICallPanel: React.FC = () => {
   };
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-green-600 to-emerald-600 px-6 py-4">
-        <div className="flex items-center justify-between">
+    <div className="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-100">
+      {/* Premium gradient header */}
+      <div className="relative bg-gradient-to-br from-slate-900 via-indigo-900 to-violet-900 px-6 py-5 overflow-hidden">
+        <div className="absolute top-0 right-0 w-48 h-48 bg-violet-500 rounded-full opacity-10 -translate-y-1/2 translate-x-1/2 pointer-events-none" />
+        <div className="absolute bottom-0 left-8 w-24 h-24 bg-indigo-400 rounded-full opacity-10 translate-y-1/2 pointer-events-none" />
+        <div className="relative flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="bg-white/20 rounded-full p-2">
-              <PhoneArrowDownLeftIcon className="h-6 w-6 text-white" />
+            <div className="bg-white/10 backdrop-blur-sm rounded-xl p-2.5 border border-white/20">
+              <PhoneArrowDownLeftIcon className="h-5 w-5 text-white" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-white">AI Sales Call</h2>
-              <p className="text-sm text-white/80">Real voice conversation with Clara</p>
+              <h2 className="text-base font-semibold text-white leading-tight">Clara AI Sales Call</h2>
+              <p className="text-xs text-violet-300/80 mt-0.5">ElevenLabs · Groq Whisper · Llama 70B</p>
             </div>
           </div>
-          <div className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(callStatus)}`}>
-            {callStatus === 'idle' && '📞 Ready'}
-            {callStatus === 'connecting' && '🔔 Connecting...'}
-            {callStatus === 'active' && '🟢 Live Call'}
+          <div className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${getStatusColor(callStatus)}`}>
+            {callStatus === 'idle' && 'Ready'}
+            {callStatus === 'connecting' && 'Connecting...'}
+            {callStatus === 'active' && (
+              <span className="flex items-center space-x-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
+                <span>Live</span>
+              </span>
+            )}
             {callStatus === 'ending' && 'Ending...'}
-            {callStatus === 'completed' && '✅ Completed'}
-            {callStatus === 'failed' && '❌ Failed'}
+            {callStatus === 'completed' && '✓ Done'}
+            {callStatus === 'failed' && 'Failed'}
           </div>
         </div>
       </div>
 
-      <div className="p-6">
+      <div className="p-5">
         {/* Backend Health Warning */}
         {!backendHealth.isHealthy && !backendHealth.isChecking && (
-          <div className="mb-4 bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="mb-4 bg-red-50 border border-red-200 rounded-xl p-4">
             <div className="flex items-start space-x-3">
-              <ExclamationTriangleIcon className="h-6 w-6 text-red-600 flex-shrink-0" />
+              <ExclamationTriangleIcon className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
               <div className="flex-1">
-                <h3 className="font-medium text-red-900">Backend Not Connected</h3>
-                <p className="text-sm text-red-700 mt-1">
-                  {backendHealth.error || 'Cannot connect to Clara backend'}
-                </p>
-                <p className="text-xs text-red-600 mt-2">
-                  Make sure clara-backend is running on port 8001
-                </p>
+                <p className="text-sm font-semibold text-red-900">Backend Not Connected</p>
+                <p className="text-xs text-red-700 mt-1">{backendHealth.error || 'Cannot connect to Clara backend'}</p>
+                <p className="text-xs text-red-500 mt-1">Make sure clara-backend is running on port 8001</p>
                 <button
                   onClick={checkBackendHealth}
-                  className="mt-2 text-sm text-red-700 hover:text-red-900 font-medium flex items-center"
+                  className="mt-2 text-xs text-red-700 hover:text-red-900 font-medium flex items-center space-x-1"
                 >
-                  <ArrowPathIcon className="h-4 w-4 mr-1" />
-                  Retry Connection
+                  <ArrowPathIcon className="h-3.5 w-3.5" />
+                  <span>Retry Connection</span>
                 </button>
               </div>
             </div>
           </div>
         )}
 
-        {/* Idle State - Start Call */}
+        {/* ── IDLE STATE ── */}
         {callStatus === 'idle' && (
-          <div className="space-y-6">
-            {/* Info Box */}
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <div className="flex items-start space-x-3">
-                <InformationCircleIcon className="h-6 w-6 text-blue-600 flex-shrink-0 mt-0.5" />
-                <div>
-                  <h3 className="font-medium text-blue-900">Real AI Voice Call</h3>
-                  <p className="text-sm text-blue-700 mt-1">
-                    Start a real voice conversation with Clara AI Sales Agent.
-                    Speak into your microphone and Clara will respond.
-                  </p>
-                  <div className="text-xs text-blue-600 mt-2 space-y-1">
-                    <p>• <strong>STT</strong>: Groq Whisper (cloud)</p>
-                    <p>• <strong>LLM</strong>: Llama 3.3 70B</p>
-                    <p>• <strong>TTS</strong>: Piper (local)</p>
-                  </div>
-                </div>
+          <div className="space-y-4">
+            <div className="grid grid-cols-3 gap-2">
+              <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3 text-center">
+                <p className="text-xs font-bold text-indigo-700 uppercase tracking-wide">STT</p>
+                <p className="text-xs text-indigo-500 mt-0.5 font-medium">Groq Whisper</p>
+              </div>
+              <div className="bg-violet-50 border border-violet-100 rounded-xl p-3 text-center">
+                <p className="text-xs font-bold text-violet-700 uppercase tracking-wide">TTS</p>
+                <p className="text-xs text-violet-500 mt-0.5 font-medium">ElevenLabs</p>
+              </div>
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-center">
+                <p className="text-xs font-bold text-blue-700 uppercase tracking-wide">LLM</p>
+                <p className="text-xs text-blue-500 mt-0.5 font-medium">Llama 3.3 70B</p>
               </div>
             </div>
 
-            {/* Backend Status */}
+            {backendHealth.isChecking && (
+              <div className="flex items-center space-x-2 text-xs text-gray-400 bg-gray-50 rounded-xl p-3 border border-gray-100">
+                <ArrowPathIcon className="h-3.5 w-3.5 animate-spin" />
+                <span>Checking backend connection...</span>
+              </div>
+            )}
+
             {backendHealth.isHealthy && backendHealth.components && (
-              <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                <div className="flex items-center space-x-2 text-green-700">
-                  <CheckCircleIcon className="h-5 w-5" />
-                  <span className="text-sm font-medium">Backend Connected</span>
+              <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3">
+                <div className="flex items-center space-x-2 mb-2">
+                  <CheckCircleIcon className="h-4 w-4 text-emerald-600" />
+                  <span className="text-sm font-semibold text-emerald-800">All Systems Ready</span>
                 </div>
-                <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-                  <div className={`flex items-center space-x-1 ${backendHealth.components.orchestrator ? 'text-green-600' : 'text-red-600'}`}>
-                    {backendHealth.components.orchestrator ? <CheckCircleIcon className="h-3 w-3" /> : <XCircleIcon className="h-3 w-3" />}
-                    <span>Orchestrator</span>
-                  </div>
-                  <div className={`flex items-center space-x-1 ${backendHealth.components.sales_agent ? 'text-green-600' : 'text-red-600'}`}>
-                    {backendHealth.components.sales_agent ? <CheckCircleIcon className="h-3 w-3" /> : <XCircleIcon className="h-3 w-3" />}
-                    <span>Sales Agent</span>
-                  </div>
-                  <div className={`flex items-center space-x-1 ${backendHealth.components.voice_stream ? 'text-green-600' : 'text-red-600'}`}>
-                    {backendHealth.components.voice_stream ? <CheckCircleIcon className="h-3 w-3" /> : <XCircleIcon className="h-3 w-3" />}
-                    <span>Voice Stream</span>
-                  </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { label: 'Orchestrator', ok: backendHealth.components.orchestrator },
+                    { label: 'Sales Agent', ok: backendHealth.components.sales_agent },
+                    { label: 'Voice', ok: backendHealth.components.voice_stream },
+                  ].map(c => (
+                    <div key={c.label} className={`flex items-center space-x-1 text-xs ${c.ok ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {c.ok ? <CheckCircleIcon className="h-3 w-3" /> : <XCircleIcon className="h-3 w-3" />}
+                      <span>{c.label}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
 
-            {/* Start Button */}
             <button
               onClick={handleStartCall}
               disabled={!backendHealth.isHealthy || backendHealth.isChecking}
-              className={`w-full flex items-center justify-center space-x-3 py-4 rounded-lg font-medium transition-all ${
+              className={`w-full py-5 rounded-2xl font-semibold text-base transition-all duration-200 flex items-center justify-center space-x-3 ${
                 backendHealth.isHealthy
-                  ? 'bg-green-600 hover:bg-green-700 text-white shadow-lg hover:shadow-xl'
-                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  ? 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white shadow-lg shadow-indigo-200/60 hover:shadow-xl hover:scale-[1.01] active:scale-[0.99]'
+                  : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}
             >
-              <PlayIcon className="h-6 w-6" />
-              <span className="text-lg">Start Voice Call</span>
+              <div className={`rounded-full p-1.5 ${backendHealth.isHealthy ? 'bg-white/20' : 'bg-gray-200'}`}>
+                <PhoneIcon className="h-5 w-5" />
+              </div>
+              <span>Start AI Voice Call</span>
             </button>
-
-            <p className="text-xs text-center text-gray-500">
-              Say "goodbye" to end the call, or press End Call button
+            <p className="text-center text-xs text-gray-400">
+              Say &quot;goodbye&quot; to end · Powered by ElevenLabs eleven_turbo_v2_5
             </p>
           </div>
         )}
 
-        {/* Active/Connecting State */}
+        {/* ── ACTIVE / CONNECTING / ENDING STATE ── */}
         {(callStatus === 'connecting' || callStatus === 'active' || callStatus === 'ending') && (
-          <div className="space-y-6">
-            {/* Call Timer & Status */}
-            <div className="text-center">
-              <div className="text-5xl font-mono font-bold text-gray-900 mb-2">
-                {formatDuration(callDuration)}
+          <div className="space-y-4">
+            <div className="bg-gradient-to-br from-slate-900 to-indigo-900 rounded-2xl p-5 text-center relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-violet-500 rounded-full opacity-10 -translate-y-1/2 translate-x-1/2 pointer-events-none" />
+              <div className="relative">
+                <div className="text-5xl font-mono font-bold text-white tracking-widest mb-3">
+                  {formatDuration(callDuration)}
+                </div>
+                {callStatus === 'active' && (
+                  <div className="flex items-end justify-center space-x-[3px] h-8 mb-3">
+                    {[4, 8, 14, 10, 18, 12, 7, 16, 9, 14, 6, 11, 8, 15, 5].map((h, i) => (
+                      <div
+                        key={i}
+                        className="w-1 bg-violet-400 rounded-full animate-pulse"
+                        style={{ height: `${h}px`, animationDuration: `${500 + i * 60}ms`, animationDelay: `${i * 40}ms` }}
+                      />
+                    ))}
+                  </div>
+                )}
+                {callStatus === 'connecting' && (
+                  <div className="flex items-center justify-center space-x-2 mb-3">
+                    <ArrowPathIcon className="h-4 w-4 text-indigo-300 animate-spin" />
+                    <span className="text-indigo-300 text-sm">Initializing voice pipeline...</span>
+                  </div>
+                )}
+                <div className="flex items-center justify-center space-x-5 text-xs">
+                  <span className="flex items-center text-emerald-400 space-x-1">
+                    <MicrophoneIcon className="h-3.5 w-3.5" /><span>Listening</span>
+                  </span>
+                  <span className="text-white/20">|</span>
+                  <span className="flex items-center text-violet-300 space-x-1">
+                    <SpeakerWaveIcon className="h-3.5 w-3.5" /><span>AI Speaking</span>
+                  </span>
+                </div>
+                {sessionId && (
+                  <p className="text-xs text-white/25 mt-2 font-mono">{sessionId.slice(0, 20)}...</p>
+                )}
               </div>
-              <div className="flex items-center justify-center space-x-4 text-sm">
-                <span className="flex items-center text-green-600">
-                  <MicrophoneIcon className="h-4 w-4 mr-1" />
-                  Listening
-                </span>
-                <span className="flex items-center text-indigo-600">
-                  <SpeakerWaveIcon className="h-4 w-4 mr-1" />
-                  AI Active
-                </span>
-              </div>
-              {sessionId && (
-                <p className="text-xs text-gray-400 mt-1">Session: {sessionId}</p>
-              )}
             </div>
 
-            {/* Real-time Qualification Status */}
-            <div className="bg-gray-50 rounded-lg p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-gray-500">Current Qualification</p>
-                  <div className="mt-1">{getQualificationBadge(qualificationStatus)}</div>
-                </div>
-                <div className="text-right">
-                  <p className="text-sm text-gray-500">Lead Score</p>
-                  <p className={`text-3xl font-bold ${getScoreColor(leadScore)}`}>{leadScore}/100</p>
-                </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-gray-50 border border-gray-100 rounded-xl p-3.5">
+                <p className="text-xs text-gray-400 font-medium mb-1.5">Qualification</p>
+                {getQualificationBadge(qualificationStatus)}
+              </div>
+              <div className="bg-gray-50 border border-gray-100 rounded-xl p-3.5">
+                <p className="text-xs text-gray-400 font-medium mb-0.5">Lead Score</p>
+                <p className={`text-2xl font-bold ${getScoreColor(leadScore)}`}>
+                  {leadScore}<span className="text-sm font-normal text-gray-400">/100</span>
+                </p>
               </div>
             </div>
 
-            {/* BANT Progress */}
-            <div className="bg-indigo-50 rounded-lg p-4">
+            <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-4">
               <div className="flex items-center justify-between mb-3">
-                <span className="text-sm font-medium text-indigo-900">BANT Assessment</span>
-                <span className="text-sm text-indigo-600 font-medium">{getBANTProgress()}/4 identified</span>
+                <span className="text-sm font-semibold text-slate-700">BANT Assessment</span>
+                <span className="text-xs font-bold text-indigo-600 bg-indigo-100 px-2.5 py-0.5 rounded-full">{getBANTProgress()}/4</span>
               </div>
               <div className="grid grid-cols-4 gap-2">
                 {(['budget', 'authority', 'need', 'timeline'] as const).map((key) => (
-                  <div 
+                  <div
                     key={key}
-                    className={`text-center p-2 rounded transition-all ${bant[key] !== 'unknown' ? 'bg-green-100 scale-105' : 'bg-gray-100'}`}
+                    className={`text-center p-2.5 rounded-xl transition-all duration-300 ${
+                      bant[key] !== 'unknown' ? 'bg-emerald-100 border border-emerald-200 shadow-sm' : 'bg-white border border-gray-200'
+                    }`}
                   >
-                    <div className="text-xs font-medium text-gray-700 capitalize">{key}</div>
+                    <p className="text-xs font-semibold text-gray-600 capitalize">{key}</p>
                     {bant[key] !== 'unknown' ? (
                       <>
-                        <CheckCircleIcon className="h-5 w-5 text-green-600 mx-auto mt-1" />
-                        <p className="text-xs text-green-700 mt-1">{bant[key]}</p>
+                        <CheckCircleIcon className="h-4 w-4 text-emerald-500 mx-auto mt-1" />
+                        <p className="text-xs text-emerald-600 mt-0.5 font-medium truncate">{bant[key]}</p>
                       </>
                     ) : (
-                      <XCircleIcon className="h-5 w-5 text-gray-400 mx-auto mt-1" />
+                      <div className="w-4 h-4 rounded-full border-2 border-dashed border-gray-300 mx-auto mt-1" />
                     )}
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* Live Transcript */}
-            <div className="bg-gray-900 rounded-lg p-4 max-h-60 overflow-y-auto">
-              <div className="text-xs text-gray-500 mb-2">Live Transcript</div>
-              <div className="space-y-3">
-                {transcript.length === 0 && (
-                  <p className="text-sm text-gray-500 italic">Waiting for conversation...</p>
-                )}
-                {transcript.map((msg, i) => (
-                  <div key={i} className={`flex items-start space-x-2 ${msg.role === 'ai' ? '' : 'flex-row-reverse space-x-reverse'}`}>
-                    <div className={`flex-shrink-0 rounded-full p-1 ${msg.role === 'ai' ? 'bg-indigo-600' : 'bg-green-600'}`}>
-                      {msg.role === 'ai' ? (
-                        <CpuChipIcon className="h-4 w-4 text-white" />
-                      ) : (
-                        <UserCircleIcon className="h-4 w-4 text-white" />
-                      )}
-                    </div>
-                    <div className={`rounded-lg px-3 py-2 max-w-[85%] ${
-                      msg.role === 'ai' 
-                        ? 'bg-indigo-900 text-indigo-100' 
-                        : 'bg-green-900 text-green-100'
-                    }`}>
-                      <p className="text-sm">{msg.text}</p>
-                    </div>
-                  </div>
-                ))}
+            <div className="bg-gray-50 border border-gray-100 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-gray-100 bg-white flex items-center justify-between">
+                <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Live Transcript</span>
                 {callStatus === 'active' && (
-                  <div className="flex items-center space-x-2 text-gray-400">
-                    <div className="flex space-x-1">
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                  <span className="flex items-center space-x-1.5 text-xs text-emerald-600">
+                    <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                    <span>Live</span>
+                  </span>
+                )}
+              </div>
+              <div className="p-4 max-h-44 overflow-y-auto space-y-3">
+                {transcript.length === 0 ? (
+                  <p className="text-sm text-gray-400 italic text-center py-3">Waiting for conversation to begin...</p>
+                ) : (
+                  transcript.map((msg, i) => (
+                    <div key={i} className={`flex items-start space-x-2 ${msg.role !== 'ai' ? 'flex-row-reverse space-x-reverse' : ''}`}>
+                      <div className={`flex-shrink-0 rounded-full p-1.5 ${msg.role === 'ai' ? 'bg-indigo-100' : 'bg-emerald-100'}`}>
+                        {msg.role === 'ai' ? <CpuChipIcon className="h-3 w-3 text-indigo-600" /> : <UserCircleIcon className="h-3 w-3 text-emerald-600" />}
+                      </div>
+                      <div className={`rounded-xl px-3 py-2 max-w-[80%] text-sm leading-relaxed ${
+                        msg.role === 'ai' ? 'bg-indigo-100 text-indigo-900' : 'bg-emerald-100 text-emerald-900'
+                      }`}>{msg.text}</div>
                     </div>
-                    <span className="text-xs">Listening...</span>
+                  ))
+                )}
+                {callStatus === 'active' && (
+                  <div className="flex items-center space-x-1 px-1">
+                    {[0, 150, 300].map(d => (
+                      <div key={d} className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: `${d}ms` }} />
+                    ))}
                   </div>
                 )}
-                {/* Scroll sentinel — always at the bottom */}
                 <div ref={transcriptEndRef} />
               </div>
             </div>
 
-            {/* Status Log */}
-            <div className="bg-gray-100 rounded-lg p-3 max-h-24 overflow-y-auto">
-              <div className="text-xs text-gray-500 mb-1">Status Log</div>
-              <div className="space-y-0.5">
-                {statusMessages.map((msg, i) => (
-                  <p key={i} className="text-xs text-gray-600 font-mono">{msg}</p>
-                ))}
-              </div>
-            </div>
-
-            {/* Error Display */}
             {error && (
-              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3">
                 <p className="text-sm text-red-700">{error}</p>
               </div>
             )}
 
-            {/* End Call Button */}
             {callStatus !== 'ending' && (
               <button
                 onClick={handleEndCall}
-                className="w-full flex items-center justify-center space-x-2 py-4 rounded-lg font-medium bg-red-600 hover:bg-red-700 text-white shadow-lg transition-all"
+                className="w-full flex items-center justify-center space-x-2 py-4 rounded-2xl font-semibold bg-red-600 hover:bg-red-700 text-white shadow-md shadow-red-200 transition-all duration-200 hover:scale-[1.01] active:scale-[0.99]"
               >
                 <PhoneXMarkIcon className="h-5 w-5" />
                 <span>End Call</span>
@@ -686,96 +766,82 @@ const AICallPanel: React.FC = () => {
           </div>
         )}
 
-        {/* Completed State */}
+        {/* ── COMPLETED STATE ── */}
         {callStatus === 'completed' && (
-          <div className="space-y-6">
-            <div className="text-center">
-              <div className="bg-green-100 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4">
-                <CheckCircleIcon className="h-8 w-8 text-green-600" />
+          <div className="space-y-4">
+            <div className="bg-gradient-to-br from-emerald-500 to-green-600 rounded-2xl p-5 text-white text-center">
+              <div className="bg-white/20 rounded-full w-12 h-12 flex items-center justify-center mx-auto mb-3">
+                <CheckCircleIcon className="h-6 w-6 text-white" />
               </div>
-              <h3 className="text-lg font-semibold text-gray-900">Call Completed!</h3>
-              <p className="text-sm text-gray-500">Duration: {formatDuration(callDuration)}</p>
+              <h3 className="font-bold text-lg">Call Completed!</h3>
+              <p className="text-sm text-white/80 mt-0.5">Duration: {formatDuration(callDuration)}</p>
             </div>
 
-            {/* Summary */}
-            <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-6">
-              <h4 className="font-semibold text-green-900 mb-4">📊 Call Summary</h4>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-sm text-gray-600">Final Qualification</p>
-                  <div className="mt-1">{getQualificationBadge(qualificationStatus)}</div>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Lead Score</p>
-                  <p className={`text-2xl font-bold ${getScoreColor(leadScore)}`}>{leadScore}/100</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">BANT Progress</p>
-                  <p className="text-lg font-semibold text-gray-900">{getBANTProgress()}/4</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Conversation Turns</p>
-                  <p className="text-lg font-semibold text-gray-900">{transcript.filter(t => t.role === 'user').length}</p>
-                </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-gray-50 border border-gray-100 rounded-xl p-4">
+                <p className="text-xs text-gray-400 font-medium mb-1.5">Final Qualification</p>
+                {getQualificationBadge(qualificationStatus)}
+              </div>
+              <div className="bg-gray-50 border border-gray-100 rounded-xl p-4">
+                <p className="text-xs text-gray-400 font-medium mb-0.5">Lead Score</p>
+                <p className={`text-2xl font-bold ${getScoreColor(leadScore)}`}>
+                  {leadScore}<span className="text-sm font-normal text-gray-400">/100</span>
+                </p>
+              </div>
+              <div className="bg-gray-50 border border-gray-100 rounded-xl p-4">
+                <p className="text-xs text-gray-400 font-medium mb-0.5">BANT Progress</p>
+                <p className="text-2xl font-bold text-gray-800">{getBANTProgress()}<span className="text-sm font-normal text-gray-400">/4</span></p>
+              </div>
+              <div className="bg-gray-50 border border-gray-100 rounded-xl p-4">
+                <p className="text-xs text-gray-400 font-medium mb-0.5">Turns</p>
+                <p className="text-2xl font-bold text-gray-800">{transcript.filter(t => t.role === 'user').length}</p>
               </div>
             </div>
 
-            {/* Full Transcript */}
             {transcript.length > 0 && (
-              <div className="bg-gray-900 rounded-lg p-4 max-h-60 overflow-y-auto">
-                <div className="text-xs text-gray-500 mb-2">📝 Full Transcript</div>
-                <div className="space-y-3">
+              <div className="bg-gray-50 border border-gray-100 rounded-xl overflow-hidden">
+                <div className="px-4 py-2.5 border-b border-gray-100 bg-white">
+                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Full Transcript</span>
+                </div>
+                <div className="p-4 max-h-44 overflow-y-auto space-y-3">
                   {transcript.map((msg, i) => (
-                    <div key={i} className={`flex items-start space-x-2 ${msg.role === 'ai' ? '' : 'flex-row-reverse space-x-reverse'}`}>
-                      <div className={`flex-shrink-0 rounded-full p-1 ${msg.role === 'ai' ? 'bg-indigo-600' : 'bg-green-600'}`}>
-                        {msg.role === 'ai' ? (
-                          <CpuChipIcon className="h-4 w-4 text-white" />
-                        ) : (
-                          <UserCircleIcon className="h-4 w-4 text-white" />
-                        )}
+                    <div key={i} className={`flex items-start space-x-2 ${msg.role !== 'ai' ? 'flex-row-reverse space-x-reverse' : ''}`}>
+                      <div className={`flex-shrink-0 rounded-full p-1.5 ${msg.role === 'ai' ? 'bg-indigo-100' : 'bg-emerald-100'}`}>
+                        {msg.role === 'ai' ? <CpuChipIcon className="h-3 w-3 text-indigo-600" /> : <UserCircleIcon className="h-3 w-3 text-emerald-600" />}
                       </div>
-                      <div className={`rounded-lg px-3 py-2 max-w-[85%] ${
-                        msg.role === 'ai' 
-                          ? 'bg-indigo-900 text-indigo-100' 
-                          : 'bg-green-900 text-green-100'
-                      }`}>
-                        <p className="text-sm">{msg.text}</p>
-                      </div>
+                      <div className={`rounded-xl px-3 py-2 max-w-[80%] text-sm leading-relaxed ${
+                        msg.role === 'ai' ? 'bg-indigo-100 text-indigo-900' : 'bg-emerald-100 text-emerald-900'
+                      }`}>{msg.text}</div>
                     </div>
                   ))}
-                  {/* Scroll sentinel for completed transcript */}
                   <div ref={transcriptEndRef} />
                 </div>
               </div>
             )}
 
-            {/* Action Buttons */}
-            <div className="space-y-3">
-              <button
-                onClick={handleNewCall}
-                className="w-full flex items-center justify-center space-x-2 py-4 rounded-lg font-medium bg-green-600 hover:bg-green-700 text-white shadow-lg transition-all"
-              >
-                <PhoneIcon className="h-5 w-5" />
-                <span>Start New Call</span>
-              </button>
-            </div>
+            <button
+              onClick={handleNewCall}
+              className="w-full flex items-center justify-center space-x-3 py-4 rounded-2xl font-semibold bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white shadow-lg shadow-indigo-200/60 transition-all duration-200 hover:scale-[1.01]"
+            >
+              <PhoneIcon className="h-5 w-5" />
+              <span>Start New Call</span>
+            </button>
           </div>
         )}
 
-        {/* Failed State */}
+        {/* ── FAILED STATE ── */}
         {callStatus === 'failed' && (
-          <div className="space-y-6">
-            <div className="text-center">
-              <div className="bg-red-100 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4">
-                <XCircleIcon className="h-8 w-8 text-red-600" />
+          <div className="space-y-5">
+            <div className="bg-red-50 border border-red-100 rounded-2xl p-6 text-center">
+              <div className="bg-red-100 rounded-full w-14 h-14 flex items-center justify-center mx-auto mb-3">
+                <XCircleIcon className="h-7 w-7 text-red-600" />
               </div>
-              <h3 className="text-lg font-semibold text-gray-900">Call Failed</h3>
-              <p className="text-sm text-red-600 mt-2">{error || 'An error occurred'}</p>
+              <h3 className="font-bold text-gray-900 text-lg">Call Failed</h3>
+              <p className="text-sm text-red-600 mt-1.5">{error || 'An error occurred'}</p>
             </div>
-
             <button
               onClick={handleNewCall}
-              className="w-full flex items-center justify-center space-x-2 py-4 rounded-lg font-medium bg-gray-600 hover:bg-gray-700 text-white shadow-lg transition-all"
+              className="w-full flex items-center justify-center space-x-2 py-4 rounded-2xl font-semibold bg-gray-800 hover:bg-gray-900 text-white transition-all duration-200"
             >
               <ArrowPathIcon className="h-5 w-5" />
               <span>Try Again</span>

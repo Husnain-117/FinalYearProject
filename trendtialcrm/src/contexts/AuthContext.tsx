@@ -1,6 +1,6 @@
 import React, { createContext, useState, useEffect, useContext, ReactNode } from 'react';
 import { Session, User as SupabaseUser } from '@supabase/supabase-js';
-import { supabase } from '../api/supabaseClient';
+import { supabase, resetAuthCircuitBreaker, isAuthCircuitOpen } from '../api/supabaseClient';
 
 // Define your extended User type including role and other app-specific details
 export interface UserProfile {
@@ -17,6 +17,7 @@ interface AuthContextType {
   user: SupabaseUser | null; // Supabase's own user object
   profile: UserProfile | null; // Your application-specific user profile
   loading: boolean;
+  serviceReachable: boolean; // false when Supabase DNS/network is down
   login: (email: string, password: string) => Promise<any>;
   signup: (email: string, password: string, fullName: string) => Promise<any>; // Added signup
   logout: () => Promise<void>;
@@ -30,6 +31,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true); // Still true initially for overall app readiness
   const [initialAuthCheckComplete, setInitialAuthCheckComplete] = useState(false);
+  const [serviceReachable, setServiceReachable] = useState(true);
 
   // Effect for initial session and auth listener
   useEffect(() => {
@@ -42,7 +44,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         console.error('[AuthContext] Initial getSession error:', sessionError.name, sessionError.message);
         // Network failure while refreshing a stale token — sign out locally (no network call)
         // to clear the stored token and stop the SDK's internal retry loop immediately.
-        if (sessionError.name === 'AuthRetryableFetchError') {
+        if (sessionError.name === 'AuthRetryableFetchError' || isAuthCircuitOpen()) {
+          setServiceReachable(false);
           supabase.auth.signOut({ scope: 'local' });
         }
       }
@@ -109,11 +112,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, [user, initialAuthCheckComplete]);
 
   const login = async (email: string, password: string) => {
-    // setLoading(true); // Let effects handle loading state based on user changes
+    // Reset circuit breaker so a fresh attempt is allowed (e.g. after project is unpaused)
+    resetAuthCircuitBreaker();
+    setServiceReachable(true);
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
-      // Consider setting loading to false here if login itself fails and no auth state change occurs
-      // setLoading(false);
+      if (error.name === 'AuthRetryableFetchError') setServiceReachable(false);
       throw error;
     }
     // onAuthStateChange will set user, triggering profile fetch effect
@@ -149,6 +153,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     user,
     profile,
     loading,
+    serviceReachable,
     login,
     signup, 
     logout,
