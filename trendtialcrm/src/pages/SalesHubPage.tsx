@@ -45,7 +45,12 @@ import {
   ChartBarIcon, 
   ClockIcon,
   SparklesIcon,
+  XMarkIcon,
+  UserCircleIcon,
+  CpuChipIcon,
+  CheckCircleIcon,
 } from '@heroicons/react/24/outline';
+import { formatDistanceToNow } from 'date-fns';
 
 // =============================================================================
 // TAB COMPONENTS
@@ -165,6 +170,9 @@ const SalesHubPage: React.FC = () => {
   const [isLoadingCalls, setIsLoadingCalls] = useState(true);
   // null = still determining; true = connected; false = unreachable
   const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
+  const [selectedCall, setSelectedCall] = useState<CRMCallRecord | null>(null);
+
+  const handleCallSelect = (call: CRMCallRecord) => setSelectedCall(call);
 
   // Fetch call statistics
   const fetchStats = useCallback(async () => {
@@ -276,7 +284,7 @@ const SalesHubPage: React.FC = () => {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Left Column - AI Call Panel */}
             <div className="lg:col-span-1">
-              <AICallPanel />
+              <AICallPanel onCallCompleted={() => { fetchStats(); fetchCalls(); }} />
             </div>
             
             {/* Right Column - Stats + Recent Calls */}
@@ -289,6 +297,7 @@ const SalesHubPage: React.FC = () => {
                 calls={calls} 
                 isLoading={isLoadingCalls}
                 limit={3}
+                onCallSelect={handleCallSelect}
               />
             </div>
           </div>
@@ -322,6 +331,7 @@ const SalesHubPage: React.FC = () => {
               calls={calls} 
               isLoading={isLoadingCalls}
               limit={20}
+              onCallSelect={handleCallSelect}
             />
           </div>
         );
@@ -332,6 +342,7 @@ const SalesHubPage: React.FC = () => {
   };
 
   return (
+    <>
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Page Header */}
@@ -422,6 +433,134 @@ const SalesHubPage: React.FC = () => {
         </div>
       </div>
     </div>
+
+    {/* ── Call Transcript Modal ── */}
+      {selectedCall && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(4px)' }}
+          onClick={() => setSelectedCall(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-indigo-600 to-violet-600 px-6 py-4 flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center space-x-3">
+                <div className="bg-white/20 rounded-full p-1.5">
+                  <PhoneIcon className="h-4 w-4 text-white" />
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold text-white">
+                    {selectedCall.lead?.contact_person || selectedCall.lead?.company_name || 'Unknown Lead'}
+                  </h2>
+                  <p className="text-xs text-indigo-200">
+                    {selectedCall.lead?.company_name && selectedCall.lead?.contact_person
+                      ? selectedCall.lead.company_name
+                      : selectedCall.call_start_time
+                        ? formatDistanceToNow(new Date(selectedCall.call_start_time), { addSuffix: true })
+                        : ''}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedCall(null)}
+                className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors"
+              >
+                <XMarkIcon className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Call Meta */}
+            <div className="px-6 py-3 border-b border-gray-100 flex flex-wrap items-center gap-4 bg-gray-50 flex-shrink-0">
+              <div className="text-xs text-gray-500">
+                <span className="font-medium text-gray-700">Duration</span>{' '}
+                {Math.floor(selectedCall.duration / 60)}:{String(selectedCall.duration % 60).padStart(2, '0')}
+              </div>
+              {selectedCall.lead_score_after != null && (
+                <div className="text-xs text-gray-500">
+                  <span className="font-medium text-gray-700">Lead Score</span>{' '}
+                  <span className={selectedCall.lead_score_after >= 70 ? 'text-green-600 font-semibold' : selectedCall.lead_score_after >= 40 ? 'text-yellow-600 font-semibold' : 'text-gray-600'}>
+                    {selectedCall.lead_score_after}/100
+                  </span>
+                </div>
+              )}
+              {selectedCall.qualification_status && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
+                  <CheckCircleIcon className="h-3 w-3 mr-1" />
+                  {selectedCall.qualification_status.replace(/_/g, ' ')}
+                </span>
+              )}
+              {selectedCall.outcome && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
+                  {selectedCall.outcome.replace(/_/g, ' ')}
+                </span>
+              )}
+            </div>
+
+            {/* Transcript */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-3">
+              {(() => {
+                if (!selectedCall.transcript) {
+                  return (
+                    <p className="text-sm text-gray-400 italic text-center py-8">
+                      No transcript available for this call.
+                    </p>
+                  );
+                }
+                const lines = selectedCall.transcript
+                  .split('\n')
+                  .filter(l => l.trim())
+                  .map(line => {
+                    if (line.startsWith('USER: ')) return { role: 'user', text: line.slice(6) };
+                    if (line.startsWith('ASSISTANT: ')) return { role: 'ai', text: line.slice(11) };
+                    return null;
+                  })
+                  .filter(Boolean) as { role: string; text: string }[];
+
+                if (lines.length === 0) {
+                  return (
+                    <pre className="text-sm text-gray-600 whitespace-pre-wrap font-sans">
+                      {selectedCall.transcript}
+                    </pre>
+                  );
+                }
+
+                return lines.map((msg, i) => (
+                  <div key={i} className={`flex items-start gap-2.5 ${
+                    msg.role !== 'ai' ? 'flex-row-reverse' : ''
+                  }`}>
+                    <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center ${
+                      msg.role === 'ai' ? 'bg-indigo-100' : 'bg-emerald-100'
+                    }`}>
+                      {msg.role === 'ai'
+                        ? <CpuChipIcon className="h-3.5 w-3.5 text-indigo-600" />
+                        : <UserCircleIcon className="h-3.5 w-3.5 text-emerald-600" />}
+                    </div>
+                    <div className={`rounded-2xl px-4 py-2.5 max-w-[80%] text-sm leading-relaxed ${
+                      msg.role === 'ai'
+                        ? 'bg-indigo-50 text-indigo-900 rounded-tl-none'
+                        : 'bg-emerald-50 text-emerald-900 rounded-tr-none'
+                    }`}>
+                      {msg.text}
+                    </div>
+                  </div>
+                ));
+              })()}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-3 border-t border-gray-100 flex-shrink-0 bg-gray-50 text-center">
+              <p className="text-xs text-gray-400">
+                {selectedCall.lead?.email && <span className="mr-3">✉ {selectedCall.lead.email}</span>}
+                {selectedCall.call_start_time && formatDistanceToNow(new Date(selectedCall.call_start_time), { addSuffix: true })}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 

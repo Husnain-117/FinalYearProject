@@ -329,7 +329,18 @@ class VoiceCallService:
         session.status = CallStatus.COMPLETED
         
         logger.info(f"Call {session_id} ended manually. Duration: {session.duration}s")
-        
+
+        # Persist transcript + qualification to CRM database
+        sales_agent = self._agents.get("sales")
+        if sales_agent and hasattr(sales_agent, 'end_call_session'):
+            try:
+                qual = session.qualification_status or "unqualified"
+                outcome = "qualified" if qual in ("sales_qualified", "opportunity") else "completed"
+                sales_agent.end_call_session(session_id, outcome=outcome)
+                logger.info(f"Call {session_id} persisted to CRM (outcome: {outcome})")
+            except Exception as crm_err:
+                logger.error(f"Failed to persist call {session_id} to CRM: {crm_err}")
+
         return {
             "success": True,
             "session_id": session_id,

@@ -37,6 +37,10 @@ import { salesCallApi, BANTAssessment, TranscriptMessage } from '../../services/
 type CallStatus = 'idle' | 'connecting' | 'active' | 'ending' | 'completed' | 'failed';
 type QualificationStatus = 'unqualified' | 'marketing_qualified' | 'sales_qualified' | 'opportunity';
 
+interface AICallPanelProps {
+  onCallCompleted?: () => void;
+}
+
 interface BackendHealth {
   isHealthy: boolean;
   isChecking: boolean;
@@ -61,7 +65,7 @@ const getSavedSession = () => {
   }
 };
 
-const AICallPanel: React.FC = () => {
+const AICallPanel: React.FC<AICallPanelProps> = ({ onCallCompleted }) => {
   // Call state - initialize ALL from sessionStorage if available
   const [sessionId, setSessionId] = useState<string | null>(() => {
     const saved = getSavedSession();
@@ -199,6 +203,14 @@ const AICallPanel: React.FC = () => {
   // Keep refs in sync so recognition callbacks always see current values
   useEffect(() => { callStatusRef.current = callStatus; }, [callStatus]);
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+
+  // Notify parent when call completes so it can refresh call history
+  useEffect(() => {
+    if (callStatus === 'completed' && onCallCompleted) {
+      const t = setTimeout(onCallCompleted, 2500);
+      return () => clearTimeout(t);
+    }
+  }, [callStatus, onCallCompleted]);
 
   // Browser Web Speech API fallback — always works, no API key needed
   const speakWithBrowser = (text: string, onEnd?: () => void) => {
