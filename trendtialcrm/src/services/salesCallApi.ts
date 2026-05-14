@@ -400,6 +400,44 @@ export const salesCallApi = {
       return null;
     }
   },
+
+  /**
+   * Transcribe audio blob to text using ElevenLabs Scribe (via backend)
+   */
+  async transcribe(audioBlob: Blob): Promise<string | null> {
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
+      const response = await fetch(`${CLARA_BACKEND_URL}/api/sales/calls/stt`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) throw new Error(`STT request failed: ${response.status}`);
+      const data = await response.json();
+      return data.text || null;
+    } catch (error) {
+      console.error('STT transcribe failed:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Send transcribed user text to an active call session and get AI response
+   */
+  async sendMessage(sessionId: string, text: string): Promise<{ message: string } | null> {
+    try {
+      const response = await fetch(`${CLARA_BACKEND_URL}/api/sales/calls/${sessionId}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!response.ok) throw new Error(`Message send failed: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      console.error('sendMessage failed:', error);
+      return null;
+    }
+  },
 };
 
 export default salesCallApi;

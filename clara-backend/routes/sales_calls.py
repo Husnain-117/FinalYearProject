@@ -8,7 +8,7 @@ REST API endpoints for AI-powered voice sales calls
 import asyncio
 import requests as http_requests
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
@@ -95,16 +95,50 @@ async def text_to_speech(request: TTSRequest):
             },
             json={
                 "text": request.text,
-                "model_id": "eleven_turbo_v2_5",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                "model_id": "eleven_flash_v2_5",
+                "voice_settings": {
+                    "stability": 0.35,
+                    "similarity_boost": 0.80,
+                    "style": 0.15,
+                    "use_speaker_boost": True,
+                },
             },
-            timeout=30,
+            timeout=20,
         )
         resp.raise_for_status()
         return Response(content=resp.content, media_type="audio/mpeg")
     except http_requests.RequestException as e:
         logger.error(f"ElevenLabs TTS error: {e}")
         raise HTTPException(status_code=503, detail=f"ElevenLabs API error: {str(e)}")
+
+
+@router.post("/stt")
+async def speech_to_text_elevenlabs(audio: UploadFile = File(...)):
+    """Transcribe speech to text using ElevenLabs Scribe API."""
+    api_key = settings.ELEVENLABS_API_KEY
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ElevenLabs API key not configured")
+
+    audio_data = await audio.read()
+    if not audio_data:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+
+    try:
+        resp = http_requests.post(
+            "https://api.elevenlabs.io/v1/speech-to-text",
+            headers={"xi-api-key": api_key},
+            files={"file": (audio.filename or "recording.webm", audio_data, audio.content_type or "audio/webm")},
+            data={"model_id": "scribe_v1"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data.get("text", "").strip()
+        logger.info(f"ElevenLabs STT transcribed: '{text[:80]}'")
+        return {"text": text, "success": True}
+    except http_requests.RequestException as e:
+        logger.error(f"ElevenLabs STT error: {e}")
+        raise HTTPException(status_code=503, detail=f"STT failed: {str(e)}")
 
 
 @router.post("/start", response_model=StartCallResponse)

@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = Field(default="AIzaSyADeYgcwx3_wLr8zNxnQJIV4cMYxT-59CA")  # Google Gemini for marketing content
     CARTESIA_API_KEY: str = Field(default="")  # For TTS
     DEEPGRAM_API_KEY: str = Field(default="")  # Backup for STT/TTS
-    ELEVENLABS_API_KEY: str = Field(default="")  # ElevenLabs TTS (primary, fast)
+    ELEVENLABS_API_KEY: str = Field(default="sk_cdaef79dbfc1838ffe7b8e51e63e1659cc3fa029763eba22")  # ElevenLabs TTS/STT (primary)
     RESEND_API_KEY: str = Field(default="re_e2bEvcQt_HJAUKNzFBRywFL9UgY5aDNhP")  # Resend email service
     RESEND_FROM_EMAIL: str = Field(default="onboarding@resend.dev")  # Sender address (use verified domain for arbitrary recipients)
     

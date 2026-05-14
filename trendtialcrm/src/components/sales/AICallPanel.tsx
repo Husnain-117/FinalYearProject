@@ -101,6 +101,8 @@ const AICallPanel: React.FC = () => {
     return saved?.statusMessages ?? [];
   });
   const [error, setError] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   
   // Backend health
   const [backendHealth, setBackendHealth] = useState<BackendHealth>({
@@ -119,6 +121,10 @@ const AICallPanel: React.FC = () => {
   // Sentinel ref — keeps the transcript pinned to the latest message
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const lastPlayedMsgRef = useRef<string>('');  // tracks last AI message spoken
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
 
   // Persist ALL session state to sessionStorage when it changes
   useEffect(() => {
@@ -226,12 +232,16 @@ const AICallPanel: React.FC = () => {
     lastPlayedMsgRef.current = latest.text;
     salesCallApi.speak(latest.text).then(blob => {
       if (blob) {
+        if (currentAudioRef.current) {
+          currentAudioRef.current.pause();
+          currentAudioRef.current = null;
+        }
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
+        currentAudioRef.current = audio;
         audio.play().catch(() => speakWithBrowser(latest.text));
-        audio.onended = () => URL.revokeObjectURL(url);
+        audio.onended = () => { URL.revokeObjectURL(url); currentAudioRef.current = null; };
       } else {
-        // ElevenLabs unavailable (e.g. 402) — use browser TTS
         speakWithBrowser(latest.text);
       }
     });
@@ -243,6 +253,8 @@ const AICallPanel: React.FC = () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
       if (timerRef.current)  clearInterval(timerRef.current);
       if (healthPollRef.current) clearTimeout(healthPollRef.current);
+      if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
+      streamRef.current?.getTracks().forEach(t => t.stop());
     };
   }, []);
 
@@ -450,6 +462,54 @@ const AICallPanel: React.FC = () => {
     }
   };
 
+  // Start microphone recording (Hold-to-Speak)
+  const handleMicPressStart = async () => {
+    if (mediaRecorderRef.current) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+      const mr = new MediaRecorder(stream, { mimeType });
+      audioChunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mediaRecorderRef.current = mr;
+      mr.start();
+      setIsRecording(true);
+      // Interrupt any playing AI audio when user starts speaking
+      if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
+      window.speechSynthesis?.cancel();
+    } catch {
+      console.error('Microphone access denied');
+    }
+  };
+
+  // Stop recording, transcribe with ElevenLabs, send to AI
+  const handleMicPressEnd = async () => {
+    const mr = mediaRecorderRef.current;
+    if (!mr) return;
+    mediaRecorderRef.current = null;
+    setIsRecording(false);
+    await new Promise<void>((resolve) => { mr.onstop = () => resolve(); mr.stop(); });
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+    if (audioBlob.size < 500 || !sessionId) return;
+    setIsProcessing(true);
+    try {
+      const text = await salesCallApi.transcribe(audioBlob);
+      if (text?.trim()) {
+        setTranscript(prev => [...prev, { role: 'user', text: text.trim(), timestamp: new Date().toISOString() }]);
+        await salesCallApi.sendMessage(sessionId, text.trim());
+      }
+    } catch (err) {
+      console.error('Voice processing error:', err);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   // Reset for new call
   const handleNewCall = () => {
     setSessionId(null);
@@ -524,7 +584,7 @@ const AICallPanel: React.FC = () => {
             </div>
             <div>
               <h2 className="text-base font-semibold text-white leading-tight">Clara AI Sales Call</h2>
-              <p className="text-xs text-violet-300/80 mt-0.5">ElevenLabs · Groq Whisper · Llama 70B</p>
+              <p className="text-xs text-violet-300/80 mt-0.5">Neural Voice · AI Transcription · Llama 70B</p>
             </div>
           </div>
           <div className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${getStatusColor(callStatus)}`}>
@@ -571,11 +631,11 @@ const AICallPanel: React.FC = () => {
             <div className="grid grid-cols-3 gap-2">
               <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3 text-center">
                 <p className="text-xs font-bold text-indigo-700 uppercase tracking-wide">STT</p>
-                <p className="text-xs text-indigo-500 mt-0.5 font-medium">Groq Whisper</p>
+                <p className="text-xs text-indigo-500 mt-0.5 font-medium">AI Voice</p>
               </div>
               <div className="bg-violet-50 border border-violet-100 rounded-xl p-3 text-center">
                 <p className="text-xs font-bold text-violet-700 uppercase tracking-wide">TTS</p>
-                <p className="text-xs text-violet-500 mt-0.5 font-medium">ElevenLabs</p>
+                <p className="text-xs text-violet-500 mt-0.5 font-medium">Neural TTS</p>
               </div>
               <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-center">
                 <p className="text-xs font-bold text-blue-700 uppercase tracking-wide">LLM</p>
@@ -626,7 +686,7 @@ const AICallPanel: React.FC = () => {
               <span>Start AI Voice Call</span>
             </button>
             <p className="text-center text-xs text-gray-400">
-              Say &quot;goodbye&quot; to end · Powered by ElevenLabs eleven_turbo_v2_5
+              Hold the mic button to speak · Say &quot;goodbye&quot; to end
             </p>
           </div>
         )}
@@ -710,6 +770,30 @@ const AICallPanel: React.FC = () => {
                   </div>
                 ))}
               </div>
+            </div>
+
+            {/* Hold-to-Speak microphone button */}
+            <div className="bg-gray-50 border border-gray-100 rounded-xl p-4 flex flex-col items-center gap-2">
+              <button
+                onPointerDown={handleMicPressStart}
+                onPointerUp={handleMicPressEnd}
+                onPointerLeave={handleMicPressEnd}
+                disabled={isProcessing || callStatus !== 'active'}
+                className={`w-16 h-16 rounded-full flex items-center justify-center transition-all duration-200 select-none ${
+                  isRecording
+                    ? 'bg-red-500 shadow-lg shadow-red-200 scale-110 ring-4 ring-red-300'
+                    : isProcessing
+                    ? 'bg-amber-400 cursor-wait'
+                    : 'bg-indigo-600 hover:bg-indigo-700 shadow-md hover:scale-105 active:scale-95'
+                }`}
+              >
+                {isProcessing
+                  ? <ArrowPathIcon className="h-7 w-7 text-white animate-spin" />
+                  : <MicrophoneIcon className="h-7 w-7 text-white" />}
+              </button>
+              <p className="text-xs text-gray-400 font-medium">
+                {isRecording ? '🔴 Listening… release to send' : isProcessing ? 'Transcribing…' : 'Hold to Speak'}
+              </p>
             </div>
 
             <div className="bg-gray-50 border border-gray-100 rounded-xl overflow-hidden">
