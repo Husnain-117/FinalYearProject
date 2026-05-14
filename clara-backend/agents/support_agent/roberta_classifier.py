@@ -15,8 +15,8 @@ from typing import List
 os.environ["TRANSFORMERS_NO_TF"] = "1"
 os.environ["USE_TF"] = "0"
 
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+# torch and transformers are imported lazily inside load_model_if_needed() so that
+# this module can be imported in production where these heavy packages are not installed.
 
 # Model directory (relative to clara-backend root)
 MODEL_DIR = os.path.join("models", "roberta_ticket_category")
@@ -25,6 +25,7 @@ MODEL_DIR = os.path.join("models", "roberta_ticket_category")
 _tokenizer = None
 _model = None
 _label_classes: List[str] = []
+_torch = None  # lazy reference set by load_model_if_needed()
 
 
 def _load_label_classes(path: str) -> List[str]:
@@ -39,13 +40,22 @@ def _load_label_classes(path: str) -> List[str]:
 
 
 def load_model_if_needed() -> None:
-    """Load tokenizer, model, and labels once into memory.
+    """
+    Load tokenizer, model, and labels once into memory.
 
     Called automatically by classify_ticket().
     """
-    global _tokenizer, _model, _label_classes
+    global _tokenizer, _model, _label_classes, _torch
 
     if _tokenizer is not None and _model is not None and _label_classes:
+        return
+
+    try:
+        import torch as _t
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        _torch = _t
+    except ImportError:
+        # torch / transformers not installed (production) — caller uses fallback category
         return
 
     if not os.path.isdir(MODEL_DIR):
@@ -57,7 +67,7 @@ def load_model_if_needed() -> None:
     _model.eval()
 
     # Use GPU if available, otherwise CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
     _model.to(device)
 
     # Load label classes (index -> category string)
@@ -76,7 +86,8 @@ def classify_ticket(text: str) -> str:
 
 
 def classify_ticket_with_confidence(text: str) -> dict:
-    """Predict the ticket category and confidence for a given text.
+    """
+    Predict the ticket category and confidence for a given text.
 
     Returns a dict with:
     - category: string like "technical", "billing", etc.
@@ -88,7 +99,9 @@ def classify_ticket_with_confidence(text: str) -> dict:
         # If model is not available for any reason, fall back gracefully
         return {"category": "general", "confidence": 0.5}
 
-    assert _tokenizer is not None and _model is not None and _label_classes
+    if _tokenizer is None or _model is None or not _label_classes or _torch is None:
+        # torch / transformers not available in this environment — return safe default
+        return {"category": "general", "confidence": 0.5}
 
     device = next(_model.parameters()).device
 
@@ -101,15 +114,15 @@ def classify_ticket_with_confidence(text: str) -> dict:
         return_tensors="pt",
     ).to(device)
 
-    with torch.no_grad():
+    with _torch.no_grad():
         outputs = _model(**inputs)
         logits = outputs.logits
         
         # Apply softmax to get probabilities
-        probabilities = torch.nn.functional.softmax(logits, dim=-1)
+        probabilities = _torch.nn.functional.softmax(logits, dim=-1)
         
         # Get the predicted class and its confidence
-        confidence, predicted_idx = torch.max(probabilities, dim=-1)
+        confidence, predicted_idx = _torch.max(probabilities, dim=-1)
         predicted_idx = int(predicted_idx.item())
         confidence_score = float(confidence.item())
 
