@@ -36,6 +36,16 @@ class TTSRequest(BaseModel):
     text: str
 
 
+class MessageRequest(BaseModel):
+    """Send a transcribed user message to an active call session (production mode).
+
+    In production the browser captures audio via Web Speech API and sends
+    the transcribed text here. The backend processes it through the LLM and
+    returns the AI reply text; the frontend then calls /tts to synthesise audio.
+    """
+    text: str
+
+
 class StartCallResponse(BaseModel):
     """Response after starting a call"""
     success: bool
@@ -170,6 +180,37 @@ async def get_call_status(session_id: str):
         raise
     except Exception as e:
         logger.error(f"Error getting call status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{session_id}/message")
+async def send_message(session_id: str, request: MessageRequest):
+    """
+    Send a transcribed user message to an active call session.
+    Used in production mode where the frontend handles mic/STT.
+    
+    Returns the AI response text, which the frontend can then TTS.
+    """
+    try:
+        service = get_voice_call_service()
+        session = service.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        if session.status != "active":
+            raise HTTPException(status_code=400, detail="Call is not active")
+
+        # Invoke the callback we stored in run_voice_call
+        if not hasattr(session, "_process_callback") or not callable(session._process_callback):
+            raise HTTPException(status_code=500, detail="Session not configured for message processing")
+            
+        result = session._process_callback(request.text)
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

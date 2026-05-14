@@ -100,36 +100,44 @@ class VoiceCallService:
         logger.info("VoiceCallService initialized")
     
     def initialize_components(self):
-        """Initialize orchestrator, agents, and voice stream"""
+        """Initialize orchestrator, agents, and voice stream.
+
+        VoiceStream (pyaudio) is only imported when VOICE_INPUT_ENABLED=true.
+        On Render (production) pyaudio is not installed, so we skip it entirely
+        and rely on the browser-side microphone + /api/sales/calls/tts endpoint.
+        """
         try:
             from orchestrator.core import get_orchestrator
             from agents.sales_agent.agent import SalesAgent
-            from input_streams.voice_stream import VoiceStream
-            
+
             if self._orchestrator is None:
                 self._orchestrator = get_orchestrator()
                 logger.info("Orchestrator initialized")
-            
+
             if "sales" not in self._agents and settings.SALES_AGENT_ENABLED:
                 self._agents["sales"] = SalesAgent()
                 logger.info("Sales Agent initialized")
-            
+
             if "support" not in self._agents and settings.SUPPORT_AGENT_ENABLED:
                 from agents.support_agent.agent import SupportAgent
                 self._agents["support"] = SupportAgent()
                 logger.info("Support Agent initialized")
-            
+
             if "marketing" not in self._agents and settings.MARKETING_AGENT_ENABLED:
                 from agents.marketing_agent.agent import MarketingAgent
                 self._agents["marketing"] = MarketingAgent()
                 logger.info("Marketing Agent initialized")
-            
-            if self._voice_stream is None:
+
+            # Only initialize microphone stream when running locally (pyaudio required)
+            if self._voice_stream is None and settings.VOICE_INPUT_ENABLED:
+                from input_streams.voice_stream import VoiceStream
                 self._voice_stream = VoiceStream()
-                logger.info("Voice Stream initialized")
-            
+                logger.info("Voice Stream initialized (local mic)")
+            elif not settings.VOICE_INPUT_ENABLED:
+                logger.info("Voice Stream skipped — VOICE_INPUT_ENABLED=false (production mode)")
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
             return False
@@ -178,7 +186,7 @@ class VoiceCallService:
                 session.status = CallStatus.ACTIVE
                 logger.info(f"Call {session_id} is now active")
 
-                # Add welcome greeting so frontend plays it immediately
+                # Add welcome greeting so frontend plays it immediately via ElevenLabs TTS
                 greeting = (
                     "Hello! Welcome to TrendtialCRM. I'm Clara, your AI sales assistant. "
                     "How can I help you today?"
@@ -190,31 +198,25 @@ class VoiceCallService:
                 })
                 logger.info("Welcome greeting added to transcript")
 
-                # Wait for frontend to play the greeting before mic starts listening
-                time.sleep(5)
-
-                # Process callback for the voice stream
+                # ── Process callback (used by both local mic loop and production REST mode) ──
                 def process_callback(text: str) -> Dict[str, Any]:
                     """Process transcribed text through the pipeline"""
                     if session._stop_requested:
                         return {"message": "Call ending...", "success": True}
-                    
+
                     try:
-                        # Add user message to transcript
                         session.transcript.append({
                             "role": "user",
                             "text": text,
                             "timestamp": datetime.utcnow().isoformat()
                         })
-                        
-                        # Process through orchestrator
+
                         processed = self._orchestrator.process_message(
                             raw_message=text,
                             input_channel="voice",
                             session_id=session_id
                         )
-                        
-                        # Route to agent; fall back to sales if target is unavailable
+
                         response = self._orchestrator.route_to_agent(processed, self._agents)
                         if not response.get("success", True) and "not initialized" in response.get("error", ""):
                             logger.warning(
@@ -223,8 +225,7 @@ class VoiceCallService:
                             )
                             processed["routing"]["target_agent"] = "sales"
                             response = self._orchestrator.route_to_agent(processed, self._agents)
-                        
-                        # Update session with metadata
+
                         metadata = response.get("metadata", {})
                         if metadata.get("qualification_status"):
                             session.qualification_status = metadata["qualification_status"]
@@ -232,58 +233,71 @@ class VoiceCallService:
                             session.lead_score = metadata["lead_score"]
                         if metadata.get("bant_assessment"):
                             session.bant = metadata["bant_assessment"]
-                        
-                        # Add AI response to transcript
+
                         session.transcript.append({
                             "role": "ai",
                             "text": response.get("message", ""),
                             "timestamp": datetime.utcnow().isoformat()
                         })
-                        
+
                         session.metadata = metadata
-                        
                         return response
-                        
+
                     except Exception as e:
                         logger.error(f"Error processing message: {e}")
                         return {"message": "I apologize, there was an error.", "success": False}
-                
-                # Minimal loop — STT + LLM only, no backend TTS (frontend plays audio)
-                logger.info("Voice listening loop started")
-                while not session._stop_requested:
-                    try:
-                        transcribed_text = self._voice_stream.capture_voice_input()
-                        if session._stop_requested:
-                            break
-                        if not transcribed_text:
+
+                # Store callback on session so REST endpoints can invoke it
+                session._process_callback = process_callback
+
+                if self._voice_stream is not None:
+                    # ── LOCAL DEV: microphone capture loop ──────────────────────────
+                    logger.info("Voice listening loop started (local mic mode)")
+                    # Brief pause so frontend can play the greeting first
+                    time.sleep(5)
+                    while not session._stop_requested:
+                        try:
+                            transcribed_text = self._voice_stream.capture_voice_input()
+                            if session._stop_requested:
+                                break
+                            if not transcribed_text:
+                                continue
+                            if self._voice_stream._is_closing_word(transcribed_text):
+                                logger.info("Closing words detected — ending call")
+                                break
+                            process_callback(transcribed_text)
+                        except Exception as loop_err:
+                            if session._stop_requested:
+                                break
+                            logger.error(f"Voice loop error: {loop_err}")
                             continue
-                        if self._voice_stream._is_closing_word(transcribed_text):
-                            logger.info("Closing words detected — ending call")
-                            break
-                        process_callback(transcribed_text)
-                    except Exception as loop_err:
-                        if session._stop_requested:
-                            break
-                        logger.error(f"Voice loop error: {loop_err}")
-                        continue
-                
+                else:
+                    # ── PRODUCTION: browser-driven mode ────────────────────────────
+                    # The frontend captures audio via the browser's Web Speech API,
+                    # sends text to POST /api/sales/calls/{session_id}/message,
+                    # and plays TTS via GET /api/sales/calls/tts.
+                    # This thread simply keeps the session ACTIVE until /end is called.
+                    logger.info("Voice session active (production/browser mode — awaiting frontend input)")
+                    while not session._stop_requested:
+                        time.sleep(1)
+
                 # Call completed
                 session.status = CallStatus.COMPLETED
                 session.end_time = datetime.utcnow()
                 if session.start_time:
                     session.duration = int((session.end_time - session.start_time).total_seconds())
-                
+
                 logger.info(f"Call {session_id} completed. Duration: {session.duration}s")
-                
+
             except Exception as e:
                 logger.error(f"Error in voice call {session_id}: {e}")
                 session.status = CallStatus.FAILED
                 session.metadata["error"] = str(e)
-        
+
         # Start background thread
         session._thread = threading.Thread(target=run_voice_call, daemon=True)
         session._thread.start()
-        
+
         return {
             "success": True,
             "session_id": session_id,
