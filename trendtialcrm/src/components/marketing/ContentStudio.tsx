@@ -435,11 +435,7 @@ const ContentStudio: React.FC<ContentStudioProps> = ({ leads }) => {
    * Open send form — pre-fill with lead email if available
    */
   const handleSend = () => {
-    if (!generatedContent) return;
-    if (contentType !== 'email') {
-      showToast('info', 'Direct send is only available for Email content. Copy other formats manually.');
-      return;
-    }
+    if (!generatedContent || contentType !== 'email') return;
     const lead = getSelectedLead();
     setRecipientEmail(lead?.email || '');
     setShowSendForm(prev => !prev);
@@ -467,7 +463,10 @@ const ContentStudio: React.FC<ContentStudioProps> = ({ leads }) => {
       setShowSendForm(false);
       setRecipientEmail('');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to send email';
+      const raw = err instanceof Error ? err.message : 'Failed to send email';
+      const msg = raw.toLowerCase().includes('testing') || raw.toLowerCase().includes('verified')
+        ? 'Email not delivered: Resend test mode only delivers to your verified address. Set a custom sender domain in Render → RESEND_FROM_EMAIL.'
+        : raw;
       showToast('error', msg);
     } finally {
       setIsSendingEmail(false);
@@ -729,8 +728,12 @@ const ContentStudio: React.FC<ContentStudioProps> = ({ leads }) => {
                 <Button
                   onClick={handleSend}
                   variant="default"
+                  disabled={contentType !== 'email'}
+                  title={contentType !== 'email' ? 'Switch to Email content type to enable sending' : undefined}
                   className={`transition-all ${
-                    showSendForm && contentType === 'email'
+                    contentType !== 'email'
+                      ? 'opacity-50 cursor-not-allowed'
+                      : showSendForm
                       ? 'bg-indigo-600 hover:bg-indigo-700'
                       : 'bg-primary hover:bg-primary/90'
                   }`}
