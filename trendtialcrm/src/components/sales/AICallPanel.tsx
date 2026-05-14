@@ -101,7 +101,7 @@ const AICallPanel: React.FC = () => {
     return saved?.statusMessages ?? [];
   });
   const [error, setError] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
+  const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   
   // Backend health
@@ -122,9 +122,10 @@ const AICallPanel: React.FC = () => {
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const lastPlayedMsgRef = useRef<string>('');  // tracks last AI message spoken
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const streamRef = useRef<MediaStream | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const isAiSpeakingRef = useRef(false);
+  const callStatusRef = useRef<CallStatus>('idle');
+  const sessionIdRef = useRef<string | null>(null);
 
   // Persist ALL session state to sessionStorage when it changes
   useEffect(() => {
@@ -195,14 +196,19 @@ const AICallPanel: React.FC = () => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcript]);
 
+  // Keep refs in sync so recognition callbacks always see current values
+  useEffect(() => { callStatusRef.current = callStatus; }, [callStatus]);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+
   // Browser Web Speech API fallback — always works, no API key needed
-  const speakWithBrowser = (text: string) => {
-    if (!('speechSynthesis' in window)) return;
+  const speakWithBrowser = (text: string, onEnd?: () => void) => {
+    if (!('speechSynthesis' in window)) { onEnd?.(); return; }
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = 0.95;
     utterance.pitch = 1.05;
     utterance.volume = 1.0;
+    if (onEnd) utterance.onend = onEnd;
     const doSpeak = () => {
       const voices = window.speechSynthesis.getVoices();
       const voice =
@@ -224,25 +230,37 @@ const AICallPanel: React.FC = () => {
 
   // Play AI response — try ElevenLabs first, fall back to browser speech
   useEffect(() => {
-    if (callStatus !== 'active') return;  // only speak during active calls
+    if (callStatus !== 'active') return;
     const aiMsgs = transcript.filter(m => m.role === 'ai');
     if (aiMsgs.length === 0) return;
     const latest = aiMsgs[aiMsgs.length - 1];
     if (latest.text === lastPlayedMsgRef.current) return;
     lastPlayedMsgRef.current = latest.text;
+
+    // Stop listening while AI speaks to prevent echo feedback
+    isAiSpeakingRef.current = true;
+    try { recognitionRef.current?.stop(); } catch {}
+    setIsListening(false);
+
+    const resumeListening = () => {
+      isAiSpeakingRef.current = false;
+      if (callStatusRef.current !== 'active') return;
+      setTimeout(() => {
+        if (callStatusRef.current !== 'active' || !recognitionRef.current) return;
+        try { recognitionRef.current.start(); setIsListening(true); } catch {}
+      }, 400);
+    };
+
     salesCallApi.speak(latest.text).then(blob => {
       if (blob) {
-        if (currentAudioRef.current) {
-          currentAudioRef.current.pause();
-          currentAudioRef.current = null;
-        }
+        if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         currentAudioRef.current = audio;
-        audio.play().catch(() => speakWithBrowser(latest.text));
-        audio.onended = () => { URL.revokeObjectURL(url); currentAudioRef.current = null; };
+        audio.play().catch(() => speakWithBrowser(latest.text, resumeListening));
+        audio.onended = () => { URL.revokeObjectURL(url); currentAudioRef.current = null; resumeListening(); };
       } else {
-        speakWithBrowser(latest.text);
+        speakWithBrowser(latest.text, resumeListening);
       }
     });
   }, [transcript]);
@@ -254,9 +272,64 @@ const AICallPanel: React.FC = () => {
       if (timerRef.current)  clearInterval(timerRef.current);
       if (healthPollRef.current) clearTimeout(healthPollRef.current);
       if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
-      streamRef.current?.getTracks().forEach(t => t.stop());
+      try { recognitionRef.current?.stop(); } catch {}
     };
   }, []);
+
+  // Init continuous speech recognition (hands-free, auto-listens during active call)
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+    const r = new SR();
+    r.continuous = false;
+    r.interimResults = false;
+    r.lang = 'en-US';
+
+    r.onresult = async (event: any) => {
+      const text = (event.results[0][0].transcript as string).trim();
+      setIsListening(false);
+      if (!text || !sessionIdRef.current) return;
+      isAiSpeakingRef.current = true; // block re-listen until AI responds
+      setIsProcessing(true);
+      setTranscript(prev => [...prev, { role: 'user', text, timestamp: new Date().toISOString() }]);
+      try { await salesCallApi.sendMessage(sessionIdRef.current, text); } catch {}
+      finally { setIsProcessing(false); }
+    };
+
+    r.onerror = (e: any) => {
+      if (e.error !== 'no-speech' && e.error !== 'aborted') console.warn('STT:', e.error);
+      setIsListening(false);
+    };
+
+    r.onend = () => {
+      setIsListening(false);
+      if (callStatusRef.current === 'active' && !isAiSpeakingRef.current) {
+        setTimeout(() => {
+          if (callStatusRef.current !== 'active' || isAiSpeakingRef.current || !recognitionRef.current) return;
+          try { recognitionRef.current.start(); setIsListening(true); } catch {}
+        }, 400);
+      }
+    };
+
+    recognitionRef.current = r;
+    return () => { try { r.stop(); } catch {} recognitionRef.current = null; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Start / stop recognition when call status changes
+  useEffect(() => {
+    if (!recognitionRef.current) return;
+    if (callStatus === 'active') {
+      isAiSpeakingRef.current = false;
+      setTimeout(() => {
+        if (callStatusRef.current !== 'active' || !recognitionRef.current) return;
+        try { recognitionRef.current.start(); setIsListening(true); } catch {}
+      }, 800);
+    } else {
+      try { recognitionRef.current.stop(); } catch {}
+      setIsListening(false);
+    }
+  }, [callStatus]);
 
   // Check backend health
   const checkBackendHealth = async () => {
@@ -462,54 +535,6 @@ const AICallPanel: React.FC = () => {
     }
   };
 
-  // Start microphone recording (Hold-to-Speak)
-  const handleMicPressStart = async () => {
-    if (mediaRecorderRef.current) return;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : 'audio/webm';
-      const mr = new MediaRecorder(stream, { mimeType });
-      audioChunksRef.current = [];
-      mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
-      mediaRecorderRef.current = mr;
-      mr.start();
-      setIsRecording(true);
-      // Interrupt any playing AI audio when user starts speaking
-      if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
-      window.speechSynthesis?.cancel();
-    } catch {
-      console.error('Microphone access denied');
-    }
-  };
-
-  // Stop recording, transcribe with ElevenLabs, send to AI
-  const handleMicPressEnd = async () => {
-    const mr = mediaRecorderRef.current;
-    if (!mr) return;
-    mediaRecorderRef.current = null;
-    setIsRecording(false);
-    await new Promise<void>((resolve) => { mr.onstop = () => resolve(); mr.stop(); });
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-    const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-    if (audioBlob.size < 500 || !sessionId) return;
-    setIsProcessing(true);
-    try {
-      const text = await salesCallApi.transcribe(audioBlob);
-      if (text?.trim()) {
-        setTranscript(prev => [...prev, { role: 'user', text: text.trim(), timestamp: new Date().toISOString() }]);
-        await salesCallApi.sendMessage(sessionId, text.trim());
-      }
-    } catch (err) {
-      console.error('Voice processing error:', err);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
   // Reset for new call
   const handleNewCall = () => {
     setSessionId(null);
@@ -686,7 +711,7 @@ const AICallPanel: React.FC = () => {
               <span>Start AI Voice Call</span>
             </button>
             <p className="text-center text-xs text-gray-400">
-              Hold the mic button to speak · Say &quot;goodbye&quot; to end
+              Just speak naturally · Say &quot;goodbye&quot; to end
             </p>
           </div>
         )}
@@ -772,28 +797,28 @@ const AICallPanel: React.FC = () => {
               </div>
             </div>
 
-            {/* Hold-to-Speak microphone button */}
-            <div className="bg-gray-50 border border-gray-100 rounded-xl p-4 flex flex-col items-center gap-2">
-              <button
-                onPointerDown={handleMicPressStart}
-                onPointerUp={handleMicPressEnd}
-                onPointerLeave={handleMicPressEnd}
-                disabled={isProcessing || callStatus !== 'active'}
-                className={`w-16 h-16 rounded-full flex items-center justify-center transition-all duration-200 select-none ${
-                  isRecording
-                    ? 'bg-red-500 shadow-lg shadow-red-200 scale-110 ring-4 ring-red-300'
-                    : isProcessing
-                    ? 'bg-amber-400 cursor-wait'
-                    : 'bg-indigo-600 hover:bg-indigo-700 shadow-md hover:scale-105 active:scale-95'
-                }`}
-              >
-                {isProcessing
-                  ? <ArrowPathIcon className="h-7 w-7 text-white animate-spin" />
-                  : <MicrophoneIcon className="h-7 w-7 text-white" />}
-              </button>
-              <p className="text-xs text-gray-400 font-medium">
-                {isRecording ? '🔴 Listening… release to send' : isProcessing ? 'Transcribing…' : 'Hold to Speak'}
-              </p>
+            {/* Voice status indicator */}
+            <div className="bg-gray-50 border border-gray-100 rounded-xl p-3 flex items-center justify-center gap-3 min-h-[52px]">
+              {isProcessing ? (
+                <>
+                  <ArrowPathIcon className="h-4 w-4 text-amber-500 animate-spin" />
+                  <span className="text-sm text-amber-600 font-medium">AI is thinking…</span>
+                </>
+              ) : isListening ? (
+                <>
+                  <div className="flex items-end gap-[3px] h-5">
+                    {[3, 5, 7, 5, 3].map((h, i) => (
+                      <div key={i} className="w-1 bg-emerald-500 rounded-full animate-pulse" style={{ height: `${h * 2}px`, animationDelay: `${i * 100}ms` }} />
+                    ))}
+                  </div>
+                  <span className="text-sm text-emerald-600 font-medium">Listening…</span>
+                </>
+              ) : (
+                <>
+                  <SpeakerWaveIcon className="h-4 w-4 text-indigo-500 animate-pulse" />
+                  <span className="text-sm text-indigo-600 font-medium">AI Speaking…</span>
+                </>
+              )}
             </div>
 
             <div className="bg-gray-50 border border-gray-100 rounded-xl overflow-hidden">
