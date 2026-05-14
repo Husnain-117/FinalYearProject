@@ -13,8 +13,11 @@
  * @author Faheem
  */
 
-// Clara backend URL - update this to match your setup
-const CLARA_BACKEND_URL = import.meta.env.VITE_CLARA_BACKEND_URL || 'http://localhost:8001';
+// Clara backend URL — trailing slash is stripped so we never get double-slash
+// URLs like https://backend-gpr3.onrender.com//api/... which Render rejects with 400.
+const CLARA_BACKEND_URL = (
+  import.meta.env.VITE_CLARA_BACKEND_URL || 'http://localhost:8001'
+).replace(/\/+$/, '');
 
 // =============================================================================
 // TYPES

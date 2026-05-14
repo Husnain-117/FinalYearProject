@@ -27,7 +27,11 @@
  * The Clara backend runs on port 8001 by default (configured in clara-backend/config.py)
  * Make sure the backend is running before making API calls
  */
-const MARKETING_API_BASE_URL = import.meta.env.VITE_CLARA_BACKEND_URL || 'http://localhost:8001';
+// Trailing slash is stripped so we never get double-slash URLs like
+// https://backend-gpr3.onrender.com//api/marketing/... (Render rejects those with 400).
+const MARKETING_API_BASE_URL = (
+  import.meta.env.VITE_CLARA_BACKEND_URL || 'http://localhost:8001'
+).replace(/\/+$/, '');
 
 // =============================================================================
 // TYPE DEFINITIONS

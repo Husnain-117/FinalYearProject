@@ -49,14 +49,27 @@ app = FastAPI(
 )
 
 # Add CORS middleware
-# In production set ALLOWED_ORIGINS=https://yourapp.vercel.app (comma-separated)
+# -------------------------------------------------------------------
+# CORS is configured to allow ALL origins so that the Vercel-hosted
+# frontend can reach this Render-hosted backend without restriction.
+#
+# IMPORTANT: The CORS spec forbids combining allow_origins=["*"] with
+# allow_credentials=True.  We work around this by:
+#   • If ALLOWED_ORIGINS is set  → use exact list + credentials=True
+#   • If ALLOWED_ORIGINS is blank → use ["*"] + credentials=False
+#     (simple fetch calls from the frontend never send cookies, so
+#      this is fine for our use-case)
+# -------------------------------------------------------------------
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "")
-_allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()] or ["*"]
+_allowed_origins = [o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()]
+_use_credentials = bool(_allowed_origins)          # True only when origins are explicit
+if not _allowed_origins:
+    _allowed_origins = ["*"]                       # Wildcard — credentials must be False
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
-    allow_credentials=True,
+    allow_credentials=_use_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
